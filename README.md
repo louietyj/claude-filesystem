@@ -50,7 +50,11 @@ The surface is curated, and that is the enforcement mechanism. There is no raw A
 
 So: thin where there is no invariant (`copy`, `search`, `history`, `download`), deliberately thick where there is (`write`, `edit`, `delete`, `upload`). The thickness is the product. Don't "simplify" it away.
 
-`edit` and `write` take strings as JSON on stdin rather than as shell arguments, and there is intentionally no way to read `old_str` from a file. File input would let the bytes be lifted mechanically (`sed`, `grep`) so that an edit never demonstrates knowledge of what it changes — which is the only reason matching on `old_str` exists.
+`edit` and `write` take their strings on stdin, raw, via a quoted heredoc — `edit` splitting old from new on a caller-chosen marker line. A JSON object is still accepted for programmatic callers.
+
+Raw is the default because the alternative nests two encodings that contradict each other. JSON escaping is not itself the asymmetry with native tools: Messages API tool inputs *are* JSON, emitted by the model as `input_json_delta` text. The asymmetry is the wrapper. Natively the JSON is the outermost thing emitted; here it sat inside a heredoc whose whole affordance is "type literal text, newlines included" — exactly what the inner JSON rejects. A quoted heredoc on its own transforms nothing, so raw stdin means one transparent layer rather than two contradictory ones.
+
+There is intentionally no way to read `old_str` from a *file*. File input would let the bytes be lifted mechanically (`sed`, `grep`) so that an edit never demonstrates knowledge of what it changes — the only reason matching on `old_str` exists. `write --stdin` weakens this at the margin, since content can reach a file without passing through the model's context; accepted because `write` could always clobber a whole file anyway, and the rev requirement is unchanged.
 
 `grep` fetches files and matches locally rather than using Dropbox's search index, because that index is asynchronous and cannot find a file written moments ago — precisely when a mid-conversation search is most likely.
 
@@ -67,15 +71,16 @@ The app is scoped to a single Dropbox app folder; nothing outside it is reachabl
 ## Testing
 
 ```
-python test_cfs.py         # 44 offline tests, no network
-bash integration_test.sh   # 108 live tests against the app folder
+python test_cfs.py         # 52 offline tests, no network
+bash integration_test.sh   # 133 live tests against the app folder
 ```
 
-The offline suite covers path traversal, edit ambiguity, JSON payload parsing and escaping, the write-mode rules, the retry policy, and root protection. The integration suite covers every command against the real API, including the guardrails only the server can enforce:
+The offline suite covers path traversal, edit ambiguity, JSON and delimiter payload parsing, the write-mode rules, the retry policy, and root protection. The integration suite covers every command against the real API, including the guardrails only the server can enforce:
 
 - a stale-rev write is rejected **and verified not to have clobbered**
 - every rev-disclosure path is asserted against the file's actual current rev
-- shell metacharacters survive verbatim through the JSON layer
+- shell metacharacters survive verbatim, through raw stdin and through JSON
+- a multi-paragraph heredoc round-trips with no escaping
 - binaries round-trip byte-identical
 - a file is deliberately corrupted, then recovered with `restore`
 

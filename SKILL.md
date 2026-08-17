@@ -7,7 +7,7 @@ description: A durable filesystem that persists across conversations, backed by 
 
 A persistent filesystem, yours alone, that survives across conversations. Backed by a scoped Dropbox app folder — nothing outside that folder is reachable.
 
-**Read this file to the end before your first write.** The command list is not the interface: writes require a `rev` proving you read the file first, `edit` refuses ambiguous matches, and text is passed as JSON on stdin. None of that is guessable from command names, and guessing costs you a failed write or a plausible-looking one that lost someone else's edit.
+**Read this file to the end before your first write.** The command list is not the interface: writes require a `rev` proving you read the file first, `edit` refuses ambiguous matches, and text goes in raw on stdin. None of that is guessable from command names, and guessing costs you a failed write or a plausible-looking one that lost someone else's edit.
 
 **Use this skill, never the Dropbox connector.** The connector sees the same files, but it is for reading the user's personal Dropbox: every write through it raises a permission dialog the user will almost certainly deny, wasting a turn and leaving the work half-done. This skill needs no approval.
 
@@ -29,8 +29,8 @@ If you see `CFS NOT FOUND`, **stop**. Do not guess a path, fall back to local fi
 $CFS list [path] [--depth N]              # names and sizes (no revs — read for those)
 $CFS read <path> [--lines 1-40] [--full]  # content AND the rev you need to write
 $CFS read <path> --rev R                  # a historical version; cannot license a write
-$CFS write <path> (--new | --rev R)       # JSON stdin: {"content": "..."}
-$CFS edit <path> --rev R [--all]          # JSON stdin: {"old_str":..., "new_str":...}
+$CFS write <path> (--new | --rev R) --stdin  # raw content on stdin
+$CFS edit <path> --rev R --delim @@ [--all]  # raw: old @@ new on stdin
 $CFS delete <path> --rev R                # --force for directories
 $CFS rename <old> <new>
 $CFS copy <src> <dst>
@@ -45,29 +45,43 @@ $CFS download <path> --to <local>
 
 ## The rev rule
 
-**YOU MUST DEMONSTRATE, VIA A CURRENT REV, THAT YOU KNOW WHAT IS IN A FILE RIGHT NOW BEFORE YOU CHANGE ANY OF IT.** The rev is not bookkeeping — it is the proof. A command hands you one only after putting the file's current bytes in front of you, so holding a valid rev and not knowing the file's contents should never both be true.
+**YOU MUST DEMONSTRATE, VIA A CURRENT REV, THAT YOU KNOW WHAT IS IN A FILE RIGHT NOW BEFORE YOU CHANGE ANY OF IT.** The rev is the proof, not bookkeeping: a command hands you one only after putting the file's current bytes in front of you. Holding a valid rev while not knowing the file's contents should never both be true.
 
-**If you are unsure whether a file changed since you last saw it, run `diff` against the rev you hold.** It reports no difference if you are up to date — and confirms your rev is still good — or shows you what changed and hands back a fresh rev. Either way you end up current. Never guess, and never write from memory of what a file said earlier in the conversation.
+The loop is **read (or diff) → get rev → write with that rev**. Dropbox verifies it server-side and rejects a stale one. When that happens, don't retry with the same rev — re-read, re-apply your change to what you get back, and write again.
 
-Dropbox verifies the rev server-side and rejects the write if the file changed since you got it. The loop is **read (or diff) → get rev → write with that rev**. If a write is rejected as stale, do not retry with the same rev — re-read, re-apply your change to the content you get back, and write again. Something changed the file and your version no longer accounts for it.
+**Unsure whether a file changed since you last saw it? `diff` against the rev you hold.** No difference confirms your rev is still good; otherwise you get the changes plus a fresh rev. Either way you end up current. Never write from memory of what a file said earlier in the conversation.
 
-`edit` refuses to act when `old_str` matches more than once, and names the lines it matched; add surrounding context rather than shortening the string. When a match fails outright, the error says whether the cause was trailing whitespace, indentation, or a near-miss line — read it before retrying.
+**Never pipe `read` through `head` or `tail` to grab just the rev.** The rev proves Dropbox sent current bytes; it does not prove you read them. Byte-exact matching protects you from clobbering content you don't understand, but not from a *stale* edit — one valid against the paragraph you remember while blind to what else changed. Content prints before the rev so that truncating the output loses both. There is no legitimate reason to read a file and discard what it returns.
 
-**Never pipe `read`'s output through `head`, `tail`, or similar to fetch just the rev.** The rev proves Dropbox sent you current bytes; it does not prove you looked at them. Byte-exact matching on `edit` protects you from clobbering content you don't understand, but it cannot protect you from writing a *stale* edit — one that's valid against the paragraph you remember while missing that something else in the same file changed too. `read`'s content is printed before its rev precisely so that truncating the output loses the rev along with it; there is no legitimate reason to call `read` and discard what it returns. If you already know a file's content, you already have its rev from your last write to it — read it again in full, or not at all.
+`edit` refuses ambiguous matches and names the lines it matched; add surrounding context rather than shortening the string. A failed match reports whether the cause was trailing whitespace, indentation, or a near-miss line — read it before retrying.
 
-## Passing text: JSON on stdin
+## Passing text: raw, via a quoted heredoc
 
-`write` and `edit` take their strings as a JSON object on stdin. Always use a **quoted** heredoc — the quotes stop the shell touching the content, and JSON handles the escaping:
+**Use `--stdin` and `--delim`; do not hand-escape JSON.** A quoted heredoc (`<<'EOF'`) passes content through untouched — literal newlines, quotes, `$`, backticks, backslashes.
 
 ```bash
-$CFS edit /memory/hawaii.md --rev 0165932a <<'JSON'
-{"old_str": "- Hotel: unbooked", "new_str": "- Hotel: booked 3 Mar"}
-JSON
+$CFS write /memory/hawaii.md --new --stdin <<'EOF'
+# Hawaii 2026
+
+Multiple paragraphs, "quotes" and $vars, all verbatim.
+EOF
 ```
 
-Newlines inside strings are `\n`. This is the reliable way to pass content containing quotes, `$`, backticks or backslashes. `write` also accepts `--content "short value"` for brief single-line writes.
+`edit` needs two strings, so name a marker line that separates them:
 
-There is deliberately **no way to read `old_str` from a file** — an edit must reproduce the text it changes, because that is what demonstrates it knows what it is changing. Do not work around this by extracting the old text mechanically.
+```bash
+$CFS edit /memory/hawaii.md --rev 0165932a --delim @@ <<'EOF'
+- Hotel: unbooked
+@@
+- Hotel: booked 3 Mar
+EOF
+```
+
+The marker must be a line of its own, appearing exactly once; pick something absent from your text (`@@`, `---8<---`). Zero or multiple occurrences fail with a message saying so. The heredoc's closing newline is dropped from each side, since it belongs to the heredoc rather than to your text.
+
+`write --content "short value"` handles brief single-line writes. Both commands also accept JSON on stdin — `{"content": ...}`, `{"old_str": ..., "new_str": ...}` — which suits programmatic callers, but hand-escaping newlines across a multi-paragraph page is the most common way these calls fail. Prefer raw.
+
+There is deliberately **no way to read `old_str` from a file**: an edit must reproduce the text it changes, because that is what demonstrates it knows what it is changing.
 
 ## Recovering from a bad write
 
@@ -80,17 +94,9 @@ $CFS read /memory/hawaii.md --rev 0165931f   # the full older version
 $CFS restore /memory/hawaii.md --rev 0165931f
 ```
 
-Restoring adds a new revision rather than erasing anything, so it is itself reversible. Use it instead of reconstructing a damaged file by hand.
+Restoring adds a new revision rather than erasing anything, so it is itself reversible — use it instead of rebuilding a damaged file by hand.
 
-`diff` prints a diff only when it is small enough to take in at a glance (~20 changed lines, under 5% of the file); past that it returns the current file instead. `--force` overrides. Revision history follows the *path*, so a file deleted and recreated under the same name inherits the old file's revisions.
-
-**To check whether a file changed since you last read it**, diff against the rev you hold:
-
-```bash
-$CFS diff /memory/hawaii.md --rev <your-last-known-rev>
-```
-
-No difference means your rev is still valid — write with it. Otherwise you get the changes plus a fresh rev, because either branch leaves you knowing the current file: a small diff applied to content you already hold, or the whole file when there is too much to read as a diff. The one exception is a file too large to print in full, where `diff` withholds the rev and tells you to read it, since it has not actually shown you the current bytes.
+`diff` shows a diff only when it is small enough to take in at a glance (~20 changed lines, under 5% of the file); past that it returns the current file, and `--force` overrides. It hands back a usable rev either way, except on a file too large to print in full, where it withholds and tells you to read. Revision history follows the *path*, so a file deleted and recreated under the same name inherits the old one's revisions.
 
 ## Finding things
 

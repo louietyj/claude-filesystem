@@ -56,6 +56,60 @@ expect_err_json "overwrite without --rev" "without --rev" '{"content":"x"}' \
 expect_ok "write --content inline for short values" \
   $CFS write $ROOT/short.md --content "brief" --new
 
+echo "=== raw stdin: no escaping, through a real shell ==="
+# The reported failure: a multi-paragraph markdown page written via JSON-in-a-
+# heredoc, where literal newlines are what the heredoc invites and what the
+# JSON rejects. Raw stdin removes the inner layer entirely.
+$CFS write $ROOT/raw.md --new --stdin <<'RAWEOF'
+# Heading
+
+A paragraph with "quotes", $HOME, `backticks`, \backslashes and a lone \n
+that must survive as four characters, not a newline.
+
+- bullet one
+- bullet two
+RAWEOF
+if [ $? -eq 0 ]; then ok "write --stdin accepts a multi-paragraph heredoc"
+else bad "write --stdin accepts a multi-paragraph heredoc"; fi
+body $ROOT/raw.md | grep -q '"quotes", \$HOME, `backticks`, \\backslashes' \
+  && ok "shell metacharacters survive raw stdin verbatim" \
+  || bad "shell metacharacters survive raw stdin verbatim"
+body $ROOT/raw.md | grep -q 'lone \\n' \
+  && ok "a literal backslash-n stays two characters" \
+  || bad "a literal backslash-n stays two characters"
+[ "$(body $ROOT/raw.md | sed -n '6p')" = "- bullet one" ] \
+  && ok "line structure is preserved exactly" || bad "line structure is preserved exactly"
+expect_err "write --content and --stdin conflict" "mutually exclusive" \
+  $CFS write $ROOT/raw.md --new --content "x" --stdin
+
+echo "=== edit --delim: two raw strings, no escaping ==="
+RAWREV=$(revof $ROOT/raw.md)
+$CFS edit $ROOT/raw.md --rev "$RAWREV" --delim @@ <<'RAWEOF'
+- bullet one
+- bullet two
+@@
+- bullet one
+- bullet two
+- bullet three
+RAWEOF
+if [ $? -eq 0 ]; then ok "edit --delim applies a multi-line replacement"
+else bad "edit --delim applies a multi-line replacement"; fi
+body $ROOT/raw.md | grep -q "bullet three" && ok "delimited edit landed" \
+  || bad "delimited edit landed"
+body $ROOT/raw.md | grep -q '"quotes"' && ok "delimited edit left the rest intact" \
+  || bad "delimited edit left the rest intact"
+
+RAWREV=$(revof $ROOT/raw.md)
+OUT=$(printf 'no marker at all\n' | $CFS edit $ROOT/raw.md --rev "$RAWREV" --delim @@ 2>&1)
+echo "$OUT" | grep -qi "not found" && ok "missing delimiter fails clearly" \
+  || bad "missing delimiter fails clearly"
+OUT=$(printf 'a\n@@\nb\n@@\nc\n' | $CFS edit $ROOT/raw.md --rev "$RAWREV" --delim @@ 2>&1)
+echo "$OUT" | grep -qi "appears 2 times" && ok "duplicate delimiter fails clearly" \
+  || bad "duplicate delimiter fails clearly"
+echo "$OUT" | grep -qi "does not occur in your content" \
+  && ok "duplicate delimiter says how to fix it" \
+  || bad "duplicate delimiter says how to fix it"
+
 echo "=== JSON payload validation ==="
 expect_err_json "malformed JSON rejected" "parse stdin as JSON" '{"content": "oops' \
   $CFS write $ROOT/b.md --new

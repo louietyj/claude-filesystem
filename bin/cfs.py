@@ -324,6 +324,76 @@ def read_payload(required: tuple[str, ...], example: str) -> dict:
     return payload
 
 
+def read_stdin_raw(what: str) -> str:
+    """Read stdin verbatim -- no escaping, no interpretation.
+
+    A quoted heredoc is a transparent layer: it transforms nothing on the way
+    through. JSON on stdin is not, and nesting the two means holding two
+    rulesets that contradict each other on the character markdown is made of --
+    the heredoc invites literal newlines, the JSON inside rejects them.
+    """
+    if sys.stdin.isatty():
+        raise CfsError(
+            f"Expected {what} on stdin. Use a quoted heredoc so the shell leaves "
+            "the content alone:\n\n" + STDIN_EXAMPLE
+        )
+    return sys.stdin.read()
+
+
+def read_delimited(delim: str) -> tuple[str, str]:
+    """Split raw stdin into old/new on a caller-chosen marker line.
+
+    The marker is chosen by the caller precisely so collisions are avoidable,
+    and it is validated so they are also detectable: failing loudly with "pick
+    another delimiter" beats a missed escape failing at a byte offset.
+    """
+    if not delim:
+        raise CfsError(
+            "--delim must not be empty: a blank marker matches the empty final "
+            "line every heredoc produces, so it can never be unique."
+        )
+    raw = read_stdin_raw("an old/new payload")
+    lines = raw.split("\n")
+    hits = [i for i, line in enumerate(lines) if line == delim]
+
+    if not hits:
+        raise CfsError(
+            f"Delimiter {delim!r} not found. The payload needs one line consisting "
+            f"of exactly {delim!r}, separating the old text from the new."
+        )
+    if len(hits) > 1:
+        rows = ", ".join(str(i + 1) for i in hits)
+        raise CfsError(
+            f"Delimiter {delim!r} appears {len(hits)} times (lines {rows}); it must "
+            "appear exactly once. Pass --delim with a marker that does not occur "
+            "in your content."
+        )
+
+    cut = hits[0]
+    old = "\n".join(lines[:cut])
+    new = "\n".join(lines[cut + 1 :])
+    # A heredoc terminates its last line with a newline that is not part of the
+    # fragment being matched, so drop exactly one. (write --stdin keeps its
+    # trailing newline: there the content IS the file, and files end with one.)
+    if new.endswith("\n"):
+        new = new[:-1]
+    return old, new
+
+
+STDIN_EXAMPLE = """\
+  cfs write /memory/notes.md --new --stdin <<'EOF'
+  # Notes
+
+  Real newlines, "quotes", $vars and \\backslashes all pass through untouched.
+  EOF"""
+
+DELIM_EXAMPLE = """\
+  cfs edit /memory/notes.md --rev 0165932a --delim @@ <<'EOF'
+  - Hotel: unbooked
+  @@
+  - Hotel: booked 3 Mar
+  EOF"""
+
 EDIT_EXAMPLE = """\
   cfs edit /memory/notes.md --rev 0165932a <<'JSON'
   {"old_str": "- Hotel: unbooked", "new_str": "- Hotel: booked 3 Mar"}
@@ -536,7 +606,11 @@ def write_mode(args, path: str):
 def cmd_write(args) -> str:
     path = normalise(args.path)
     if args.content is not None:
+        if args.stdin:
+            raise CfsError("--content and --stdin are mutually exclusive.")
         content = args.content
+    elif args.stdin:
+        content = read_stdin_raw("the file content")
     else:
         content = read_payload(("content",), WRITE_EXAMPLE)["content"]
     data = content.encode("utf-8")
@@ -548,8 +622,11 @@ def cmd_write(args) -> str:
 
 def cmd_edit(args) -> str:
     path = normalise(args.path)
-    payload = read_payload(("old_str", "new_str"), EDIT_EXAMPLE)
-    old, new = payload["old_str"], payload["new_str"]
+    if args.delim:
+        old, new = read_delimited(args.delim)
+    else:
+        payload = read_payload(("old_str", "new_str"), EDIT_EXAMPLE)
+        old, new = payload["old_str"], payload["new_str"]
     if not args.rev:
         raise CfsError(
             f"Refusing to edit {path} without --rev. Read the file first and pass "
@@ -1037,6 +1114,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("path")
     p.add_argument("--content", help="inline content, for short single-line values")
+    p.add_argument(
+        "--stdin",
+        action="store_true",
+        help="read the content raw from stdin (no JSON, no escaping)",
+    )
     p.add_argument("--rev", help="current rev; required when overwriting")
     p.add_argument("--new", action="store_true", help="create; fails if path exists")
     p.set_defaults(func=cmd_write)
@@ -1047,6 +1129,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("path")
     p.add_argument("--rev", help="current rev, from read")
+    p.add_argument(
+        "--delim",
+        help="read raw stdin, splitting old from new on a line equal to this marker",
+    )
     p.add_argument(
         "--all",
         action="store_true",

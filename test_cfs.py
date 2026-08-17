@@ -208,6 +208,59 @@ class TestReadPayload(unittest.TestCase):
             cfs.read_payload(("content",), "example")
 
 
+class TestReadDelimited(unittest.TestCase):
+    def _stdin(self, text):
+        sys.stdin = io.StringIO(text)
+        self.addCleanup(setattr, sys, "stdin", sys.__stdin__)
+
+    def test_splits_on_the_marker_line(self):
+        self._stdin("old line\n@@\nnew line\n")
+        self.assertEqual(cfs.read_delimited("@@"), ("old line", "new line"))
+
+    def test_multiline_both_sides(self):
+        self._stdin("a\nb\n@@\nc\nd\n")
+        self.assertEqual(cfs.read_delimited("@@"), ("a\nb", "c\nd"))
+
+    def test_empty_new_side_is_a_deletion(self):
+        self._stdin("gone\n@@\n")
+        self.assertEqual(cfs.read_delimited("@@"), ("gone", ""))
+
+    def test_content_needing_json_escapes_passes_through_untouched(self):
+        raw = 'say "hi" $HOME `now` \\ done\n@@\nreplaced\n'
+        self._stdin(raw)
+        old, new = cfs.read_delimited("@@")
+        self.assertEqual(old, 'say "hi" $HOME `now` \\ done')
+        self.assertEqual(new, "replaced")
+
+    def test_marker_must_be_a_whole_line(self):
+        # "@@" inside a line is content, not a delimiter.
+        self._stdin("prefix @@ suffix\n@@\nnew\n")
+        self.assertEqual(cfs.read_delimited("@@"), ("prefix @@ suffix", "new"))
+
+    def test_missing_delimiter_raises(self):
+        self._stdin("no marker here\n")
+        with self.assertRaises(cfs.CfsError) as ctx:
+            cfs.read_delimited("@@")
+        self.assertIn("not found", str(ctx.exception))
+
+    def test_duplicate_delimiter_raises_with_line_numbers(self):
+        self._stdin("a\n@@\nb\n@@\nc\n")
+        with self.assertRaises(cfs.CfsError) as ctx:
+            cfs.read_delimited("@@")
+        message = str(ctx.exception)
+        self.assertIn("appears 2 times", message)
+        self.assertIn("lines 2, 4", message)
+
+    def test_empty_delimiter_is_rejected(self):
+        # A blank marker would match the empty final element every heredoc
+        # produces, so it can never be unique. Reject it by name rather than
+        # letting it fail as a confusing duplicate.
+        self._stdin("old\n\nnew\n")
+        with self.assertRaises(cfs.CfsError) as ctx:
+            cfs.read_delimited("")
+        self.assertIn("must not be empty", str(ctx.exception))
+
+
 class TestNoFileIndirection(unittest.TestCase):
     """old_str must be generated inline; reading it from a file would defeat
     the proof-of-knowledge that matching on old_str exists to provide."""
