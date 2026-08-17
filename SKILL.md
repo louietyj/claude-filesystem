@@ -37,7 +37,7 @@ $CFS copy <src> <dst>
 $CFS grep <regex> [--path P] [-i] [-C N] [-l]   # regex search: exact and immediate
 $CFS search <query> [--path P] [--names-only]   # Dropbox index: async, no regex
 $CFS history <path>                       # previous revisions, newest first
-$CFS diff <path> [--rev A] [--to B]       # what changed; falls back to the whole file
+$CFS diff <path> --from R [--to B]        # changed since R; falls back to whole file
 $CFS restore <path> --rev R               # roll back to an earlier revision
 $CFS upload <path> --from <local> (--new | --rev R)   # binaries, generated files
 $CFS download <path> --to <local>
@@ -49,7 +49,7 @@ $CFS download <path> --to <local>
 
 The loop is **read (or diff) → get rev → write with that rev**. Dropbox verifies it server-side and rejects a stale one. When that happens, don't retry with the same rev — re-read, re-apply your change to what you get back, and write again.
 
-**Unsure whether a file changed since you last saw it? `diff` against the rev you hold.** No difference confirms your rev is still good; otherwise you get the changes plus a fresh rev. Either way you end up current. Never write from memory of what a file said earlier in the conversation.
+**Unsure whether a file changed since you last saw it? `diff --from <the rev you hold>`.** It answers with `UNCHANGED` (your rev is still good) or `CHANGED` plus the current content and a fresh rev. Either way you end up current. `--from` is mandatory and you must pass *your own* rev: there is no default, because the file's previous revision has no relationship to what you have in context. Never write from memory of what a file said earlier in the conversation.
 
 **Never pipe `read` through `head` or `tail` to grab just the rev.** The rev proves Dropbox sent current bytes; it does not prove you read them. Byte-exact matching protects you from clobbering content you don't understand, but not from a *stale* edit — one valid against the paragraph you remember while blind to what else changed. Content prints before the rev so that truncating the output loses both. There is no legitimate reason to read a file and discard what it returns.
 
@@ -81,7 +81,11 @@ The marker must be a line of its own, appearing exactly once; pick something abs
 
 `write --content "short value"` handles brief single-line writes. Both commands also accept JSON on stdin — `{"content": ...}`, `{"old_str": ..., "new_str": ...}` — which suits programmatic callers, but hand-escaping newlines across a multi-paragraph page is the most common way these calls fail. Prefer raw.
 
-There is deliberately **no way to read `old_str` from a file**: an edit must reproduce the text it changes, because that is what demonstrates it knows what it is changing.
+**NEVER write your text to a scratch file and pipe it in.** Not `create_file` then `< /tmp/x.txt`, not `cat` into the command — the strings always go inline in the tool call, in the heredoc. If a heredoc fails, the cause is nearly always a mistake in the heredoc itself: the terminator must be alone on its own line, so `EOF@@` on one line silently swallows the rest as content. Fix that; do not route around it. Piping from a file makes such a typo *disappear* rather than fixing it, and you will attribute the fix to the wrong cause and repeat the mistake.
+
+To replace a whole file with something already on disk, use `upload` — that is what it is for. Text you are composing goes inline; bytes that already exist as a file go through `upload`.
+
+There is also deliberately **no way to read `old_str` from a file**: an edit must reproduce the text it changes, because that is what demonstrates it knows what it is changing.
 
 ## Recovering from a bad write
 
@@ -89,7 +93,7 @@ Every file keeps 30 days of revisions, so a bad write is a rollback rather than 
 
 ```bash
 $CFS history /memory/hawaii.md               # revisions, newest first
-$CFS diff /memory/hawaii.md                  # what the last write changed
+$CFS diff /memory/hawaii.md --from 0165931f  # what changed since that rev
 $CFS read /memory/hawaii.md --rev 0165931f   # the full older version
 $CFS restore /memory/hawaii.md --rev 0165931f
 ```

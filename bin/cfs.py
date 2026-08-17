@@ -25,6 +25,7 @@ import json
 import os
 import random
 import re
+import stat
 import sys
 import tempfile
 import time
@@ -324,6 +325,40 @@ def read_payload(required: tuple[str, ...], example: str) -> dict:
     return payload
 
 
+def _stdin_source_file() -> str | None:
+    """Best-effort: was stdin redirected from a named file rather than a heredoc?
+
+    bash backs heredocs with temp files too, but names them distinctively, so
+    this is a heuristic and only ever warns. It exists because routing text
+    through a scratch file is a real failure mode: it does not fix heredoc
+    syntax errors, it hides them, and the agent then attributes the fix to the
+    wrong cause.
+    """
+    try:
+        if not stat.S_ISREG(os.fstat(0).st_mode):
+            return None  # a pipe or tty, so not a file redirect
+        target = os.readlink("/proc/self/fd/0")
+    except (OSError, AttributeError, ValueError):
+        return None  # not Linux, or /proc unavailable: stay silent
+    name = os.path.basename(target)
+    if name.startswith(("sh-thd", "sh-np", "sh-he")):
+        return None  # a shell heredoc temp file
+    return target
+
+
+def warn_if_piped_from_file(command: str) -> None:
+    source = _stdin_source_file()
+    if source:
+        print(
+            f"Warning: {command} read its text from the file {source} rather than "
+            "from an inline heredoc. Write the strings inline in the command "
+            "instead. Routing text through a scratch file does not fix heredoc "
+            "mistakes, it conceals them -- and for a whole-file replacement from "
+            "a file on disk, `cfs upload` is the command you want.",
+            file=sys.stderr,
+        )
+
+
 def read_stdin_raw(what: str) -> str:
     """Read stdin verbatim -- no escaping, no interpretation.
 
@@ -610,6 +645,7 @@ def cmd_write(args) -> str:
             raise CfsError("--content and --stdin are mutually exclusive.")
         content = args.content
     elif args.stdin:
+        warn_if_piped_from_file("write --stdin")
         content = read_stdin_raw("the file content")
     else:
         content = read_payload(("content",), WRITE_EXAMPLE)["content"]
@@ -623,6 +659,7 @@ def cmd_write(args) -> str:
 def cmd_edit(args) -> str:
     path = normalise(args.path)
     if args.delim:
+        warn_if_piped_from_file("edit --delim")
         old, new = read_delimited(args.delim)
     else:
         payload = read_payload(("old_str", "new_str"), EDIT_EXAMPLE)
@@ -898,19 +935,16 @@ def cmd_diff(args) -> str:
     A diff of a mostly-rewritten file is worse than useless: pages of -/+ that
     obscure rather than explain. Past a threshold this refuses and tells you to
     read the file, which is the answer you actually wanted.
+
+    --from is mandatory and has no default. Defaulting to the penultimate
+    revision looked convenient but answered a different question -- "what did
+    the last write change?" is a fact about the file's history with no
+    relationship to what the caller has in context. It could report one changed
+    line to someone whose whole picture was stale, because two writes had landed
+    since their read and it only compared the last two.
     """
     path = normalise(args.path)
-
-    if args.rev:
-        old_rev = args.rev
-    else:
-        result = rpc(
-            "/2/files/list_revisions", {"path": api_path(path), "mode": "path", "limit": 2}
-        )
-        entries = result.get("entries", [])
-        if len(entries) < 2:
-            return f"{path} has only one revision; there is nothing to compare against."
-        old_rev = entries[1]["rev"]
+    old_rev = args.from_rev
 
     old_data, old_meta = content_download({"path": f"rev:{old_rev}"})
     if args.to:
@@ -935,11 +969,15 @@ def cmd_diff(args) -> str:
     # tells you nothing you do not already have.
     newer = args.to if args.to else new_meta["rev"]
 
+    # A verdict word first, and again beside the rev at the bottom. The two
+    # outcomes previously differed only in a sentence buried above a wall of
+    # file content, which skims as "here is the file, all fine" regardless of
+    # what actually happened.
     if old_text == new_text:
         if args.to:
-            return f"No difference between {old_rev} and {args.to}."
+            return f"UNCHANGED: {path} is identical at {old_rev} and {args.to}."
         return (
-            f"No difference: {path} is unchanged since {old_rev}, so that rev is "
+            f"UNCHANGED: {path} has not changed since {old_rev}, so that rev is "
             "still valid for editing or writing."
         )
 
@@ -964,7 +1002,7 @@ def cmd_diff(args) -> str:
         if truncated:
             shown = shown[:MAX_VIEW_CHARS]
         head = (
-            f"{changed} of ~{largest} lines differ between {old_rev} and "
+            f"CHANGED: {changed} of ~{largest} lines differ between {old_rev} and "
             f"{newer} -- too much to read as a diff, so here is the current file "
             f"instead. (--force for the raw diff; read {path} --rev {old_rev} for "
             "the older version.)\n\n"
@@ -983,21 +1021,22 @@ def cmd_diff(args) -> str:
         return (
             head
             + numbered(shown)
-            + f"\n{DIFF_MARK}\nrev: {newer}   (the whole current file is above, so "
-            "this rev is valid for edit/write/delete)"
+            + f"\n{DIFF_MARK}\nCHANGED since {old_rev}. The whole current file is "
+            f"above, so this rev is valid for edit/write/delete.\nrev: {newer}"
         )
 
     header = (
-        f"{changed} changed line(s) between {old_rev} "
+        f"CHANGED: {changed} line(s) differ between {old_rev} "
         f"({old_meta.get('server_modified', '?')}) and {newer}:"
     )
     return (
         header
         + "\n"
         + "\n".join(diff)
-        + f"\n{DIFF_MARK}\nrev: {newer}   (valid for edit/write/delete: you hold "
-        f"{old_rev}'s content and the delta above reconstructs the current file. "
-        "If you do not actually have that older content, read the file instead.)"
+        + f"\n{DIFF_MARK}\nCHANGED since {old_rev}. This rev is valid for "
+        f"edit/write/delete because you hold {old_rev}'s content and the delta "
+        "above reconstructs the current file. If you do not actually have that "
+        f"older content, read {path} instead.\nrev: {newer}"
     )
 
 
@@ -1176,10 +1215,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-files", type=int, default=200)
     p.set_defaults(func=cmd_grep)
 
-    p = sub.add_parser("diff", help="show what changed between two revisions")
+    p = sub.add_parser("diff", help="show what changed since a rev you hold")
     p.add_argument("path")
-    p.add_argument("--rev", help="older rev (default: the previous revision)")
-    p.add_argument("--to", help="newer rev (default: current)")
+    p.add_argument(
+        "--from",
+        dest="from_rev",
+        required=True,
+        help="the rev you are comparing FROM -- normally the one you last read",
+    )
+    p.add_argument("--to", help="newer rev (default: the current file)")
     p.add_argument("-C", "--context", type=int, default=3)
     p.add_argument(
         "--force", action="store_true", help="show the diff even if it is mostly noise"

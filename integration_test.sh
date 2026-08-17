@@ -215,20 +215,22 @@ python -c "
 ls=['line %d'%i for i in range(100)]; ls[50]='EDITED LINE'
 print('\n'.join(ls))" > d2.tmp
 $CFS upload $ROOT/d.md --from d2.tmp --rev "$D1" >/dev/null
-OUT=$($CFS diff $ROOT/d.md)
+OUT=$($CFS diff $ROOT/d.md --from "$D1")
 echo "$OUT" | grep -q -- "-line 50" && ok "diff shows the removed line" \
   || bad "diff shows the removed line"
 echo "$OUT" | grep -q -- "+EDITED LINE" && ok "diff shows the added line" \
   || bad "diff shows the added line"
-echo "$OUT" | grep -q "2 changed line" && ok "diff reports the change count" \
+echo "$OUT" | grep -q "2 line(s) differ" && ok "diff reports the change count" \
   || bad "diff reports the change count"
 echo "$OUT" | grep -q "^rev: " && ok "diff hands back a usable rev" \
   || bad "diff hands back a usable rev"
 rm -f d1.tmp d2.tmp
 D1B=$(revof $ROOT/d.md)
-$CFS diff $ROOT/d.md --rev "$D1B" --to "$D1B" | grep -qi "no difference" \
-  && ok "diff of a rev against itself reports no difference" \
-  || bad "diff of a rev against itself reports no difference"
+$CFS diff $ROOT/d.md --from "$D1B" --to "$D1B" | grep -q "^UNCHANGED" \
+  && ok "diff of a rev against itself reports UNCHANGED" \
+  || bad "diff of a rev against itself reports UNCHANGED"
+$CFS diff $ROOT/d.md --from "$D1B" --to "$D1B" | grep -q "^CHANGED" \
+  && bad "unchanged output does not say CHANGED" || ok "unchanged output does not say CHANGED"
 
 # A small file is below the 5% threshold for any change at all -- by design it
 # returns the file rather than a diff, since reading it whole is just as easy.
@@ -237,7 +239,7 @@ expect_ok_json "seed a small file" '{"content":"alpha\nbeta\ngamma\n"}' \
 SREV=$(revof $ROOT/small.md)
 expect_ok_json "change one line of it" '{"content":"alpha\nBETA\ngamma\n"}' \
   $CFS write $ROOT/small.md --rev "$SREV"
-OUT=$($CFS diff $ROOT/small.md)
+OUT=$($CFS diff $ROOT/small.md --from "$SREV")
 echo "$OUT" | grep -q "BETA" && ok "small file returns whole content, not a diff" \
   || bad "small file returns whole content, not a diff"
 echo "$OUT" | grep -qi "too much to read as a diff" \
@@ -250,7 +252,7 @@ $CFS upload $ROOT/d.md --from big.tmp --rev "$D2" >/dev/null
 D3=$(revof $ROOT/d.md)
 python -c "print('\n'.join('new line %d'%i for i in range(120)))" > big2.tmp
 $CFS upload $ROOT/d.md --from big2.tmp --rev "$D3" >/dev/null
-OUT=$($CFS diff $ROOT/d.md)
+OUT=$($CFS diff $ROOT/d.md --from "$D3")
 echo "$OUT" | grep -qi "too much to read as a diff" \
   && ok "wholesale rewrite declines the diff" || bad "wholesale rewrite declines the diff"
 echo "$OUT" | grep -q "new line 5" \
@@ -258,7 +260,7 @@ echo "$OUT" | grep -q "new line 5" \
   || bad "declined diff returns the current file instead"
 echo "$OUT" | grep -q "^rev: " && ok "declined diff still hands back a usable rev" \
   || bad "declined diff still hands back a usable rev"
-$CFS diff $ROOT/d.md --force | grep -q -- "+new line 5" \
+$CFS diff $ROOT/d.md --from "$D3" --force | grep -q -- "+new line 5" \
   && ok "--force overrides the cap" || bad "--force overrides the cap"
 rm -f big.tmp big2.tmp
 
@@ -293,8 +295,13 @@ echo "$FULLOUT" | grep -qi "only valid if you read all" \
 # name would inherit revisions from previous runs and stop being single-revision.
 ONCE="$ROOT/once-$$-$(date +%s).md"
 expect_ok_json "single-revision file" '{"content":"only\n"}' $CFS write "$ONCE" --new
-$CFS diff "$ONCE" | grep -qi "only one revision" \
-  && ok "single-revision file explains itself" || bad "single-revision file explains itself"
+# --from has no default: the penultimate rev is a fact about the file's history
+# with no relationship to what the caller has in context, so guessing it could
+# report one changed line to someone whose whole picture was stale.
+OUT=$($CFS diff "$ONCE" 2>&1)
+if [ $? -eq 0 ]; then bad "diff without --from is refused"
+elif echo "$OUT" | grep -qi -- "--from"; then ok "diff without --from is refused"
+else bad "diff without --from is refused (got: $OUT)"; fi
 
 echo "=== old_str mismatch diagnostics ==="
 # old_str must genuinely fail to match: a substring of a line still matches, so
@@ -357,7 +364,7 @@ withholds "grep"        $CFS grep "alpha" --path $ROOT
 withholds "history"     $CFS history $ROOT/g1.md
 withholds "read --rev"  $CFS read $ROOT/g1.md --rev "$(prev_rev $ROOT/g1.md)"
 
-# diff is deliberately NOT in that list. Passing --rev <mine> means you hold
+# diff is deliberately NOT in that list. Passing --from <mine> means you hold
 # that revision's content, so base+delta (or the whole file, in the oversized
 # branch) leaves you knowing the current bytes -- which is the bar for a rev.
 # Needs a file with two revisions, so build one rather than assuming.
@@ -367,12 +374,20 @@ TWO_OLD=$(revof $ROOT/two.md)
 expect_ok_json "give it a second revision" '{"old_str":"two","new_str":"TWO"}' \
   $CFS edit $ROOT/two.md --rev "$TWO_OLD"
 TWO_CUR=$(revof $ROOT/two.md)
-$CFS diff $ROOT/two.md --rev "$TWO_OLD" | grep -q "$TWO_CUR" \
+$CFS diff $ROOT/two.md --from "$TWO_OLD" | grep -q "$TWO_CUR" \
   && ok "diff DISCLOSES the current rev (it shows you the current content)" \
   || bad "diff DISCLOSES the current rev (it shows you the current content)"
-$CFS diff $ROOT/two.md --rev "$TWO_CUR" | grep -qi "still valid for editing" \
+$CFS diff $ROOT/two.md --from "$TWO_CUR" | grep -q "^UNCHANGED" \
   && ok "no-change diff confirms your rev is still good" \
   || bad "no-change diff confirms your rev is still good"
+# The misread that prompted this: a large diff skimmed as "all fine". The
+# verdict must be unmissable at the top AND next to the rev at the bottom.
+OUT=$($CFS diff $ROOT/two.md --from "$TWO_OLD")
+echo "$OUT" | grep -q "^CHANGED" && ok "changed output leads with CHANGED" \
+  || bad "changed output leads with CHANGED"
+echo "$OUT" | grep -q "CHANGED since $TWO_OLD" \
+  && ok "the verdict is repeated beside the rev" \
+  || bad "the verdict is repeated beside the rev"
 
 STALE_OUT=$(echo '{"old_str":"alpha","new_str":"x"}' \
   | $CFS edit $ROOT/g1.md --rev 0123456789 2>&1)
