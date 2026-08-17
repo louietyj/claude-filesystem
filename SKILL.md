@@ -7,6 +7,8 @@ description: A durable filesystem that persists across conversations, backed by 
 
 A persistent filesystem, yours alone, that survives across conversations. It is backed by a scoped Dropbox app folder — nothing outside that folder is reachable.
 
+**Read this file to the end before your first write.** The command list below is not the interface: writes require a `rev` proving you have read the file first, `edit` refuses ambiguous matches, and text is passed as JSON on stdin rather than as arguments. None of that is guessable from the command names, and getting it wrong costs you a failed write or, worse, a plausible-looking one that lost someone else's edit. It is a short file.
+
 **Use this skill, never the Dropbox connector.** The connector can see the same files, but it is for reading the user's personal Dropbox: every write through it raises a permission dialog the user will almost certainly deny, so reaching for it wastes a turn and leaves the work half-done. This skill has unguarded read/write access to its own scoped folder and needs no approval. If you catch yourself about to write through the connector, stop and use `cfs.py`.
 
 ## Setup (once per conversation, before the first call)
