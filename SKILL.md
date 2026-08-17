@@ -45,9 +45,11 @@ $CFS download <path> --to <local>
 
 ## The rev rule
 
-Every write to an existing file requires that file's current `rev`, which you only get by reading it. Dropbox verifies it server-side and rejects the write if the file changed since your read.
+**YOU MUST DEMONSTRATE, VIA A CURRENT REV, THAT YOU KNOW WHAT IS IN A FILE RIGHT NOW BEFORE YOU CHANGE ANY OF IT.** The rev is not bookkeeping — it is the proof. A command hands you one only after putting the file's current bytes in front of you, so holding a valid rev and not knowing the file's contents should never both be true.
 
-The loop is always **read → get rev → write with that rev**. If a write is rejected as stale, do not retry with the same rev — re-read, re-apply your change to the content you get back, and write again. Something changed the file and your version no longer accounts for it.
+**If you are unsure whether a file changed since you last saw it, run `diff` against the rev you hold.** It reports no difference if you are up to date — and confirms your rev is still good — or shows you what changed and hands back a fresh rev. Either way you end up current. Never guess, and never write from memory of what a file said earlier in the conversation.
+
+Dropbox verifies the rev server-side and rejects the write if the file changed since you got it. The loop is **read (or diff) → get rev → write with that rev**. If a write is rejected as stale, do not retry with the same rev — re-read, re-apply your change to the content you get back, and write again. Something changed the file and your version no longer accounts for it.
 
 `edit` refuses to act when `old_str` matches more than once, and names the lines it matched; add surrounding context rather than shortening the string. When a match fails outright, the error says whether the cause was trailing whitespace, indentation, or a near-miss line — read it before retrying.
 
@@ -88,7 +90,7 @@ Restoring adds a new revision rather than erasing anything, so it is itself reve
 $CFS diff /memory/hawaii.md --rev <your-last-known-rev>
 ```
 
-If it reports no difference, your rev is still valid and you can write with it. If it reports changes, your rev is stale — the output shows what changed, but you must `read` again to get a usable rev. No command other than `read` will give you one.
+No difference means your rev is still valid — write with it. Otherwise you get the changes plus a fresh rev, because either branch leaves you knowing the current file: a small diff applied to content you already hold, or the whole file when there is too much to read as a diff. The one exception is a file too large to print in full, where `diff` withholds the rev and tells you to read it, since it has not actually shown you the current bytes.
 
 ## Finding things
 

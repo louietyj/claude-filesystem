@@ -168,8 +168,8 @@ echo "$OUT" | grep -q -- "+EDITED LINE" && ok "diff shows the added line" \
   || bad "diff shows the added line"
 echo "$OUT" | grep -q "2 changed line" && ok "diff reports the change count" \
   || bad "diff reports the change count"
-echo "$OUT" | grep -q "rev: " && bad "diff withholds the current rev" \
-  || ok "diff withholds the current rev"
+echo "$OUT" | grep -q "^rev: " && ok "diff hands back a usable rev" \
+  || bad "diff hands back a usable rev"
 rm -f d1.tmp d2.tmp
 D1B=$(revof $ROOT/d.md)
 $CFS diff $ROOT/d.md --rev "$D1B" --to "$D1B" | grep -qi "no difference" \
@@ -202,8 +202,8 @@ echo "$OUT" | grep -qi "too much to read as a diff" \
 echo "$OUT" | grep -q "new line 5" \
   && ok "declined diff returns the current file instead" \
   || bad "declined diff returns the current file instead"
-echo "$OUT" | grep -q "rev: " && bad "declined diff withholds the current rev" \
-  || ok "declined diff withholds the current rev"
+echo "$OUT" | grep -q "^rev: " && ok "declined diff still hands back a usable rev" \
+  || bad "declined diff still hands back a usable rev"
 $CFS diff $ROOT/d.md --force | grep -q -- "+new line 5" \
   && ok "--force overrides the cap" || bad "--force overrides the cap"
 rm -f big.tmp big2.tmp
@@ -301,8 +301,24 @@ withholds "list"        $CFS list $ROOT --depth 5
 withholds "search"      $CFS search "freshlywritten" --path $ROOT
 withholds "grep"        $CFS grep "alpha" --path $ROOT
 withholds "history"     $CFS history $ROOT/g1.md
-withholds "diff"        $CFS diff $ROOT/g1.md
 withholds "read --rev"  $CFS read $ROOT/g1.md --rev "$(prev_rev $ROOT/g1.md)"
+
+# diff is deliberately NOT in that list. Passing --rev <mine> means you hold
+# that revision's content, so base+delta (or the whole file, in the oversized
+# branch) leaves you knowing the current bytes -- which is the bar for a rev.
+# Needs a file with two revisions, so build one rather than assuming.
+expect_ok_json "seed a two-revision file" '{"content":"one\ntwo\n"}' \
+  $CFS write $ROOT/two.md --new
+TWO_OLD=$(revof $ROOT/two.md)
+expect_ok_json "give it a second revision" '{"old_str":"two","new_str":"TWO"}' \
+  $CFS edit $ROOT/two.md --rev "$TWO_OLD"
+TWO_CUR=$(revof $ROOT/two.md)
+$CFS diff $ROOT/two.md --rev "$TWO_OLD" | grep -q "$TWO_CUR" \
+  && ok "diff DISCLOSES the current rev (it shows you the current content)" \
+  || bad "diff DISCLOSES the current rev (it shows you the current content)"
+$CFS diff $ROOT/two.md --rev "$TWO_CUR" | grep -qi "still valid for editing" \
+  && ok "no-change diff confirms your rev is still good" \
+  || bad "no-change diff confirms your rev is still good"
 
 STALE_OUT=$(echo '{"old_str":"alpha","new_str":"x"}' \
   | $CFS edit $ROOT/g1.md --rev 0123456789 2>&1)

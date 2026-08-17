@@ -35,7 +35,12 @@ Every write to an existing file requires that file's current `rev`, obtainable o
 
 No local "last read" state is kept, and none would be trustworthy if it were — the sandbox is per-conversation and can reset mid-session, so anything cached locally would be unreliable exactly when it mattered. Pushing the check to the server also makes it correct across two conversations writing concurrently.
 
-A rev is therefore not a version number but **evidence that the caller has seen the file's current bytes**. Every command is audited against that: `read`, `write`, `edit` and `upload` disclose a rev because you have either seen or authored the content; `list`, `search`, `diff`, `restore`, `read --rev` and the stale-rev error all deliberately withhold it. Disclosing one anywhere else mints the evidence for free and voids the guarantee, so there are integration tests pinning each case.
+A rev is therefore not a version number but **evidence that the caller has seen the file's current bytes**. Every command is audited against that:
+
+- **Discloses**: `read`, `write`, `edit`, `upload` — you have seen or authored the content. `diff` too: passing `--rev <yours>` means you hold that revision, so base plus delta reconstructs the current file, and the oversized branch returns the whole file outright.
+- **Withholds**: `list`, `search`, `grep`, `history`, `restore`, `read --rev`, the stale-rev error, and `diff` when the file was too large to print in full — none of these put the current bytes in front of you.
+
+Disclosing one anywhere else mints the evidence for free and voids the guarantee. The integration suite audits every command against the **actual current rev string**, never against formatting like `"rev: "` — an earlier version made that mistake and `diff` and `history` leaked the live rev in plain sight while passing.
 
 ## Command surface
 

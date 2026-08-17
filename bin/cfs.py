@@ -810,6 +810,10 @@ def cmd_grep(args) -> str:
 DIFF_MAX_CHANGED_LINES = 20
 DIFF_MAX_CHANGED_FRACTION = 0.05
 
+# Same role as read's marker: an unambiguous end-of-content line, since "---"
+# is legitimate markdown and appears inside real memory files.
+DIFF_MARK = "[end of diff output]"
+
 
 def cmd_diff(args) -> str:
     """Show what changed between two revisions, unless that would be noise.
@@ -846,10 +850,13 @@ def cmd_diff(args) -> str:
     old_lines = old_text.split("\n")
     new_lines = new_text.split("\n")
 
-    # Never name the newer rev. Doing so would let `diff --rev <mine>` hand back
-    # a writable rev while showing only the changed lines -- a partial view of
-    # the file plus a licence to write over the rest.
-    newer = "the current file" if not args.to else f"rev {args.to}"
+    # diff DOES disclose the newer rev, and that is the point of the command.
+    # Passing --rev <mine> means you already hold that revision's content, so
+    # base + delta is the current file; the oversized branch hands back the whole
+    # file instead. Either way you end up knowing the current bytes, which is the
+    # bar for receiving a rev -- withholding it here would force a re-read that
+    # tells you nothing you do not already have.
+    newer = args.to if args.to else new_meta["rev"]
 
     if old_text == new_text:
         if args.to:
@@ -876,24 +883,45 @@ def cmd_diff(args) -> str:
     )
     if not eyeballable and not args.force:
         shown = new_text
-        note = ""
-        if len(shown) > MAX_VIEW_CHARS:
+        truncated = len(shown) > MAX_VIEW_CHARS
+        if truncated:
             shown = shown[:MAX_VIEW_CHARS]
-            note = f"\n\n[truncated at {MAX_VIEW_CHARS} chars; read with --lines to page]"
-        return (
+        head = (
             f"{changed} of ~{largest} lines differ between {old_rev} and "
-            f"{newer} -- too much to read as a diff, so here is the "
-            f"current file instead. (--force for the raw diff; "
-            f"read {path} --rev {old_rev} for the older version.)\n\n"
+            f"{newer} -- too much to read as a diff, so here is the current file "
+            f"instead. (--force for the raw diff; read {path} --rev {old_rev} for "
+            "the older version.)\n\n"
+        )
+        if truncated:
+            # The one branch that does not earn a rev: the file was too big to
+            # show in full, so this call has not put the current bytes in front
+            # of you and cannot certify them.
+            return (
+                head
+                + numbered(shown)
+                + f"\n{DIFF_MARK}\n[truncated at {MAX_VIEW_CHARS} chars, so no rev "
+                f"is given -- you have not seen the whole file. Read {path} "
+                "with --lines or --full to page through it and get its rev.]"
+            )
+        return (
+            head
             + numbered(shown)
-            + note
+            + f"\n{DIFF_MARK}\nrev: {newer}   (the whole current file is above, so "
+            "this rev is valid for edit/write/delete)"
         )
 
     header = (
         f"{changed} changed line(s) between {old_rev} "
         f"({old_meta.get('server_modified', '?')}) and {newer}:"
     )
-    return header + "\n" + "\n".join(diff)
+    return (
+        header
+        + "\n"
+        + "\n".join(diff)
+        + f"\n{DIFF_MARK}\nrev: {newer}   (valid for edit/write/delete: you hold "
+        f"{old_rev}'s content and the delta above reconstructs the current file. "
+        "If you do not actually have that older content, read the file instead.)"
+    )
 
 
 def cmd_history(args) -> str:
