@@ -976,9 +976,23 @@ def cmd_diff(args) -> str:
     if old_text == new_text:
         if args.to:
             return f"UNCHANGED: {path} is identical at {old_rev} and {args.to}."
+        # Identical content does not imply an identical rev. A file edited x->y
+        # and back to x has the bytes it started with but a new rev, and the old
+        # one will be rejected -- so answering purely on content would promise a
+        # rev that fails, with a rejection message ("the file changed since you
+        # read it") that is itself wrong, because the content did not change.
+        current = new_meta["rev"]
+        if current == old_rev:
+            return (
+                f"UNCHANGED: {path} has not changed since {old_rev}, and that is "
+                "still the current rev -- valid for editing or writing."
+            )
         return (
-            f"UNCHANGED: {path} has not changed since {old_rev}, so that rev is "
-            "still valid for editing or writing."
+            f"UNCHANGED CONTENT, NEW REV: {path} holds exactly the content it had "
+            f"at {old_rev}, but it has been rewritten since, so {old_rev} is stale "
+            "and any write using it will be rejected. What you already have is "
+            f"current, so nothing needs re-reading -- just use the rev below."
+            f"\n{DIFF_MARK}\nrev: {current}"
         )
 
     diff = list(
