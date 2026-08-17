@@ -390,23 +390,53 @@ def cmd_list(args) -> str:
 
 
 def cmd_read(args) -> str:
+    """Content first, rev last -- on purpose.
+
+    A rev only means anything if it is evidence you saw the bytes it describes.
+    Printing it up front lets `read ... | head -3` harvest a valid-looking rev
+    while discarding the content it is supposed to certify -- the exactness
+    check on write then protects against clobbering bytes you looked at, but
+    not against an edit built on a stale memory of parts of the file that never
+    reached you. Putting the rev after the content does not stop a determined
+    `tail`, but it does mean the reflexive `head` shortcut yields no rev at all.
+    """
     path = normalise(args.path)
     if args.rev:
         data, meta = content_download({"path": f"rev:{args.rev}"})
     else:
         data, meta = content_download({"path": api_path(path)})
     text = data.decode("utf-8", "replace")
+    # A single trailing newline terminates the last line; it does not start a
+    # further, empty one. Without stripping it, split("\n") reports one line
+    # too many on almost every file we write, which would make the "read all
+    # N lines" warning below wrong on the common case rather than the edge case.
+    display_text = text[:-1] if text.endswith("\n") else text
+    all_lines = display_text.split("\n")
+    total = len(all_lines)
+
+    top = f"{path}  ({total} line(s))\n"
+
+    # An unambiguous marker, not "---": memory files are markdown, where "---"
+    # is legitimately YAML frontmatter or a horizontal rule. A separator that
+    # can appear in real content is a separator that can mislabel where the
+    # content actually ends.
+    MARK = "[end of file content]"
 
     if args.rev:
-        # Deliberately does not report the current rev: this call proves you have
-        # seen an old version, not the live one, so it must not license a write.
-        header = (
-            f"{path} at historical rev {args.rev}\n"
-            "This is an old revision, not the current file. You cannot write with "
-            f"this rev -- read {path} without --rev for that, or use restore.\n"
+        # Deliberately never discloses the current rev: this call proves you
+        # have seen an old version, not the live one, so it must not license a
+        # write.
+        footer = (
+            f"\n{MARK}\nThis is a historical revision (rev {args.rev}), not the "
+            f"current file. It cannot be used to write -- read {path} without "
+            "--rev for that, or use restore."
         )
     else:
-        header = f"{path}\nrev: {meta['rev']}   (pass this rev to edit/write/delete)\n"
+        footer = (
+            f"\n{MARK}\nrev: {meta['rev']}   (pass this rev to edit/write/delete -- "
+            f"only valid if you read all {total} line(s) above, not a piped "
+            "excerpt)"
+        )
 
     if args.lines:
         try:
@@ -414,22 +444,30 @@ def cmd_read(args) -> str:
             start, end = int(start_s), int(end_s)
         except ValueError as exc:
             raise CfsError("--lines expects START-END, e.g. 1-40 or 20--1") from exc
-        all_lines = text.split("\n")
         if end == -1:
-            end = len(all_lines)
+            end = total
         selected = all_lines[max(start - 1, 0) : end]
-        return header + numbered("\n".join(selected), start=max(start, 1))
+        body = numbered("\n".join(selected), start=max(start, 1))
+        if not args.rev:
+            footer += (
+                f"\nThis rev covers the WHOLE file, not just lines {start}-{end}. "
+                "A partial view is fine for reading, but do not edit content "
+                "outside the range you actually saw."
+            )
+        return top + body + footer
 
-    if len(text) > MAX_VIEW_CHARS and not args.full:
-        shown = text[:MAX_VIEW_CHARS]
-        total = text.count("\n") + 1
-        return (
-            header
-            + numbered(shown)
-            + f"\n\n[truncated at {MAX_VIEW_CHARS} chars; file has {total} lines. "
-            "Use --lines START-END to page, or --full.]"
+    if len(display_text) > MAX_VIEW_CHARS and not args.full:
+        shown = display_text[:MAX_VIEW_CHARS]
+        truncated_at = numbered(shown).count("\n") + 1
+        footer += (
+            f"\n[truncated after {truncated_at} of {total} lines ({MAX_VIEW_CHARS} "
+            "chars); the rev above still describes the WHOLE file. Use --lines "
+            "START-END to page through the rest, or --full, before editing "
+            "anything past what you have actually read.]"
         )
-    return header + numbered(text)
+        return top + numbered(shown) + footer
+
+    return top + numbered(display_text) + footer
 
 
 MEMORY_ROOT = "/memory"

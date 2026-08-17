@@ -51,6 +51,8 @@ The loop is always **read → get rev → write with that rev**. If a write is r
 
 `edit` refuses to act when `old_str` matches more than once, and names the lines it matched; add surrounding context rather than shortening the string. When a match fails outright, the error says whether the cause was trailing whitespace, indentation, or a near-miss line — read it before retrying.
 
+**Never pipe `read`'s output through `head`, `tail`, or similar to fetch just the rev.** The rev proves Dropbox sent you current bytes; it does not prove you looked at them. Byte-exact matching on `edit` protects you from clobbering content you don't understand, but it cannot protect you from writing a *stale* edit — one that's valid against the paragraph you remember while missing that something else in the same file changed too. `read`'s content is printed before its rev precisely so that truncating the output loses the rev along with it; there is no legitimate reason to call `read` and discard what it returns. If you already know a file's content, you already have its rev from your last write to it — read it again in full, or not at all.
+
 ## Passing text: JSON on stdin
 
 `write` and `edit` take their strings as a JSON object on stdin. Always use a **quoted** heredoc — the quotes stop the shell touching the content, and JSON handles the escaping:

@@ -32,9 +32,15 @@ expect_err_json() {
   else bad "$d (wrong error: $out)"; fi
 }
 revof() { $CFS read "$1" 2>/dev/null | sed -n 's/^rev: \([a-z0-9]*\).*/\1/p'; }
-# Skip the two header lines (path, rev) so comparisons test content only --
-# the rev necessarily changes across a restore.
-body()  { $CFS read "$1" 2>/dev/null | tail -n +3 | sed 's/^ *[0-9]*\t//'; }
+# Strip the one-line header and everything from the "[end of file content]"
+# marker onward (the rev footer), so comparisons test content only -- the rev
+# necessarily changes across a restore, and the header's line count would too.
+body() {
+  $CFS read "$1" 2>/dev/null \
+    | tail -n +2 \
+    | sed '/^\[end of file content\]$/,$d' \
+    | sed 's/^ *[0-9]*\t//'
+}
 
 echo "=== create / write via JSON stdin ==="
 expect_ok_json "write --new with JSON stdin" '{"content": "line one\nline two\n"}' \
@@ -207,9 +213,26 @@ $CFS read $ROOT/d.md --rev "$D3" | grep -q "old line 5" \
 CURD=$(revof $ROOT/d.md)
 $CFS read $ROOT/d.md --rev "$D3" | grep -q "$CURD" \
   && bad "read --rev withholds the current rev" || ok "read --rev withholds the current rev"
-$CFS read $ROOT/d.md --rev "$D3" | grep -qi "cannot write with this rev" \
+$CFS read $ROOT/d.md --rev "$D3" | grep -qi "cannot be used to write" \
   && ok "read --rev says it cannot license a write" \
   || bad "read --rev says it cannot license a write"
+
+echo "=== head no longer harvests a rev (the case-status.md incident) ==="
+# The failure this defends against: piping read through head to grab a rev
+# while discarding the content the rev is supposed to certify. Content now
+# comes before the rev, so head -3 on a multi-line file sees no rev at all.
+expect_ok_json "seed a multi-line file" '{"content":"one\ntwo\nthree\nfour\nfive\n"}' \
+  $CFS write $ROOT/head.md --new
+HEADOUT=$($CFS read $ROOT/head.md | head -3)
+echo "$HEADOUT" | grep -q "rev:" && bad "head -3 yields no rev" || ok "head -3 yields no rev"
+FULLOUT=$($CFS read $ROOT/head.md)
+echo "$FULLOUT" | grep -q "^rev: " && ok "the full read still discloses a rev" \
+  || bad "the full read still discloses a rev"
+echo "$FULLOUT" | grep -q "(5 line(s))" && ok "header states the total line count" \
+  || bad "header states the total line count"
+echo "$FULLOUT" | grep -qi "only valid if you read all" \
+  && ok "rev line warns it is void without a full read" \
+  || bad "rev line warns it is void without a full read"
 # Dropbox keeps revision history per path across delete-and-recreate, so a fixed
 # name would inherit revisions from previous runs and stop being single-revision.
 ONCE="$ROOT/once-$$-$(date +%s).md"
