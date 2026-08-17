@@ -1,0 +1,16 @@
+# Credentials. credentials.json holds the app secret and a long-lived refresh
+# token; anyone with it has full read/write on the Dropbox app folder.
+credentials*.json
+!credentials.example.json
+.cfs-token.json
+
+# Packaged skill -- embeds credentials.json, so it is a secret too.
+*.zip
+
+# Test scratch files. The integration suite writes these into the repo root and
+# only removes them on the success path, so a failed run leaves them behind.
+*.tmp
+*.log
+
+dist/
+__pycache__/
