@@ -32,6 +32,8 @@ expect_err_json() {
   else bad "$d (wrong error: $out)"; fi
 }
 revof() { $CFS read "$1" 2>/dev/null | sed -n 's/^rev: \([a-z0-9]*\).*/\1/p'; }
+# Second-newest rev, i.e. the newest one history is still willing to print.
+prev_rev() { $CFS history "$1" 2>/dev/null | sed -n 's/.*rev:\([a-z0-9]*\).*/\1/p' | head -1; }
 # Strip the one-line header and everything from the "[end of file content]"
 # marker onward (the rev footer), so comparisons test content only -- the rev
 # necessarily changes across a restore, and the header's line count would too.
@@ -277,14 +279,31 @@ if [ "$(body $ROOT/a.md)" = "$GOODBODY" ]; then ok "restore recovered exact cont
 else bad "restore recovered exact content"; fi
 body $ROOT/a.md | grep -q "CORRUPTED" && bad "corruption gone" || ok "corruption gone"
 
-echo "=== rev disclosure: read is the only source of a current rev ==="
+echo "=== rev disclosure audit: every command, against the real rev value ==="
 # A rev is evidence that a file has been read. Any command that hands one out
 # without a read mints that evidence for free and voids read-before-write.
-$CFS list $ROOT --depth 5 | grep -q "rev:" \
-  && bad "list withholds revs" || ok "list withholds revs"
-$CFS search "freshlywritten" --path $ROOT 2>/dev/null | grep -q "rev:" \
-  && bad "search withholds revs" || ok "search withholds revs"
+#
+# These assert on the ACTUAL current rev string, never on formatting like
+# "rev: ". An earlier version of this audit grepped for the prefix, so `diff`
+# and `history` printed the live rev bare and passed anyway.
 CUR=$(revof $ROOT/g1.md)
+[ -n "$CUR" ] && ok "audit has a real rev to test against ($CUR)" \
+  || bad "audit has a real rev to test against"
+
+# withholds <label> <command...>  -- fails if the current rev appears in output
+withholds() {
+  local d="$1"; shift
+  if "$@" 2>&1 | grep -q "$CUR"; then bad "$d withholds the current rev"
+  else ok "$d withholds the current rev"; fi
+}
+
+withholds "list"        $CFS list $ROOT --depth 5
+withholds "search"      $CFS search "freshlywritten" --path $ROOT
+withholds "grep"        $CFS grep "alpha" --path $ROOT
+withholds "history"     $CFS history $ROOT/g1.md
+withholds "diff"        $CFS diff $ROOT/g1.md
+withholds "read --rev"  $CFS read $ROOT/g1.md --rev "$(prev_rev $ROOT/g1.md)"
+
 STALE_OUT=$(echo '{"old_str":"alpha","new_str":"x"}' \
   | $CFS edit $ROOT/g1.md --rev 0123456789 2>&1)
 echo "$STALE_OUT" | grep -q "$CUR" \
@@ -296,8 +315,16 @@ STALE_W=$(echo '{"content":"x"}' | $CFS write $ROOT/g1.md --rev 0123456789 2>&1)
 echo "$STALE_W" | grep -q "$CUR" \
   && bad "stale write error withholds the current rev" \
   || ok "stale write error withholds the current rev"
-$CFS read $ROOT/g1.md | grep -q "^rev: " && ok "read discloses the rev" \
-  || bad "read discloses the rev"
+
+# The positive case: read must still hand out a usable rev, or the whole
+# scheme is unusable rather than merely safe.
+$CFS read $ROOT/g1.md | grep -q "$CUR" && ok "read discloses the current rev" \
+  || bad "read discloses the current rev"
+
+# history must still expose OLDER revs -- restore depends on them.
+$CFS history $ROOT/g1.md | grep -q "rev:" \
+  && ok "history still exposes older revs for restore" \
+  || bad "history still exposes older revs for restore"
 
 echo "=== --new conflict is diagnosed correctly (not as a stale rev) ==="
 OUT=$(echo '{"content":"x"}' | $CFS write $ROOT/g1.md --new 2>&1)

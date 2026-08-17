@@ -82,6 +82,14 @@ Restoring adds a new revision rather than erasing anything, so it is itself reve
 
 `diff` prints a diff only when it is small enough to take in at a glance (~20 changed lines, under 5% of the file); past that it returns the current file instead. `--force` overrides. Revision history follows the *path*, so a file deleted and recreated under the same name inherits the old file's revisions.
 
+**To check whether a file changed since you last read it**, diff against the rev you hold:
+
+```bash
+$CFS diff /memory/hawaii.md --rev <your-last-known-rev>
+```
+
+If it reports no difference, your rev is still valid and you can write with it. If it reports changes, your rev is stale — the output shows what changed, but you must `read` again to get a usable rev. No command other than `read` will give you one.
+
 ## Finding things
 
 ```bash

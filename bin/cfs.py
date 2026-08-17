@@ -846,13 +846,23 @@ def cmd_diff(args) -> str:
     old_lines = old_text.split("\n")
     new_lines = new_text.split("\n")
 
+    # Never name the newer rev. Doing so would let `diff --rev <mine>` hand back
+    # a writable rev while showing only the changed lines -- a partial view of
+    # the file plus a licence to write over the rest.
+    newer = "the current file" if not args.to else f"rev {args.to}"
+
     if old_text == new_text:
-        return f"No difference between {old_rev} and {new_meta['rev']}."
+        if args.to:
+            return f"No difference between {old_rev} and {args.to}."
+        return (
+            f"No difference: {path} is unchanged since {old_rev}, so that rev is "
+            "still valid for editing or writing."
+        )
 
     diff = list(
         difflib.unified_diff(
             old_lines, new_lines, fromfile=f"{path}@{old_rev}",
-            tofile=f"{path}@{new_meta['rev']}", lineterm="", n=args.context,
+            tofile=f"{path}@{newer}", lineterm="", n=args.context,
         )
     )
     changed = sum(
@@ -872,7 +882,7 @@ def cmd_diff(args) -> str:
             note = f"\n\n[truncated at {MAX_VIEW_CHARS} chars; read with --lines to page]"
         return (
             f"{changed} of ~{largest} lines differ between {old_rev} and "
-            f"{new_meta['rev']} -- too much to read as a diff, so here is the "
+            f"{newer} -- too much to read as a diff, so here is the "
             f"current file instead. (--force for the raw diff; "
             f"read {path} --rev {old_rev} for the older version.)\n\n"
             + numbered(shown)
@@ -881,7 +891,7 @@ def cmd_diff(args) -> str:
 
     header = (
         f"{changed} changed line(s) between {old_rev} "
-        f"({old_meta.get('server_modified', '?')}) and {new_meta['rev']}:"
+        f"({old_meta.get('server_modified', '?')}) and {newer}:"
     )
     return header + "\n" + "\n".join(diff)
 
@@ -896,16 +906,24 @@ def cmd_history(args) -> str:
     if not entries:
         return f"No revision history for {path}."
 
+    deleted = result.get("is_deleted", False)
     lines = [f"Revisions of {path} (newest first):"]
-    if result.get("is_deleted"):
+    if deleted:
         lines.append("  (the file is currently deleted; restore brings it back)")
-    for entry in entries:
-        lines.append(
-            f"  {entry['server_modified']}\t{human_size(entry['size']):>7}\t"
-            f"rev:{entry['rev']}"
-        )
+
+    for i, entry in enumerate(entries):
+        stamp = f"  {entry['server_modified']}\t{human_size(entry['size']):>7}\t"
+        # When the file exists, entries[0] IS the live file, so printing its rev
+        # would hand out a writable rev to a caller who has read no content --
+        # the same hole `list` and `search` were closed for. Restore only ever
+        # needs an older rev, so withholding this one costs nothing.
+        if i == 0 and not deleted:
+            lines.append(stamp + "(current — read the file to get its rev)")
+        else:
+            lines.append(stamp + f"rev:{entry['rev']}")
+
     lines.append("")
-    lines.append(f"Restore one with: cfs restore {path} --rev <rev>")
+    lines.append(f"Restore an older one with: cfs restore {path} --rev <rev>")
     return "\n".join(lines)
 
 
