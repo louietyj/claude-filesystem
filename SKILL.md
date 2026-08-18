@@ -7,9 +7,9 @@ description: A durable filesystem that persists across conversations, backed by 
 
 A persistent filesystem, yours alone, that survives across conversations. Backed by a scoped Dropbox app folder — nothing outside that folder is reachable.
 
-**Read this file to the end before your first write.** The command list is not the interface: writes require a `rev` proving you read the file first, `edit` refuses ambiguous matches, and text goes in raw on stdin. None of that is guessable from command names, and guessing costs you a failed write or a plausible-looking one that lost someone else's edit.
+**Read this file to the end before your first write.** The command list is not the interface: writes need a `rev` proving you read the file first, `edit` takes a SEARCH/REPLACE block and refuses ambiguous matches. Neither is guessable from command names, and guessing costs a failed write — or a plausible one that lost someone else's edit.
 
-**Use this skill, never the Dropbox connector.** The connector sees the same files, but it is for reading the user's personal Dropbox: every write through it raises a permission dialog the user will almost certainly deny, wasting a turn and leaving the work half-done. This skill needs no approval.
+**Use this skill, never the Dropbox connector.** The connector sees the same files, but every write through it raises a permission dialog the user will almost certainly deny, wasting a turn and leaving the job half-done. This skill needs no approval.
 
 ## Setup (once per conversation)
 
@@ -21,24 +21,25 @@ CFS_PY=/mnt/skills/user/durable-filesystem/bin/cfs.py
 $CFS list /
 ```
 
-If you see `CFS NOT FOUND`, **stop**. Do not guess a path, fall back to local files, or use the connector. Tell the user the skill files are missing — every command below will fail, and any "memory" you produce without them is fiction.
+On `CFS NOT FOUND`, **stop**. Don't guess a path, fall back to local files, or use the connector — tell the user the skill files are missing. Every command below will fail, and any "memory" you produce without them is fiction.
 
 ## Commands
 
 ```bash
 $CFS list [path] [--depth N]              # names and sizes (no revs — read for those)
 $CFS read <path> [--lines 1-40] [--full]  # content AND the rev you need to write
-$CFS read <path> --rev R                  # a historical version; cannot license a write
+$CFS read <path> --rev R                  # an old version; can NOT license a write
 $CFS write <path> (--new | --rev R) --stdin  # raw content on stdin
-$CFS edit <path> --rev R [--tag T] [--all]   # SEARCH/REPLACE block on stdin
+$CFS edit <path> --rev R [--tag T] [--all]   # ONE SEARCH/REPLACE block on stdin
+$CFS diff <path> --from R [--to B]        # ALWAYS use this to refresh a rev you
+                                          #   already hold. NEVER history+read for that.
+$CFS history <path>                       # old revs for restore. NOT a currency check.
+$CFS restore <path> --rev R               # roll back to an earlier revision
+$CFS grep <regex> [--path P] [-i] [-C N] [-l]   # regex search: exact and immediate
+$CFS search <query> [--path P] [--names-only]   # Dropbox index: async, no regex
 $CFS delete <path> --rev R                # --force for directories
 $CFS rename <old> <new>
 $CFS copy <src> <dst>
-$CFS grep <regex> [--path P] [-i] [-C N] [-l]   # regex search: exact and immediate
-$CFS search <query> [--path P] [--names-only]   # Dropbox index: async, no regex
-$CFS history <path>                       # previous revisions, newest first
-$CFS diff <path> --from R [--to B]        # changed since R; falls back to whole file
-$CFS restore <path> --rev R               # roll back to an earlier revision
 $CFS upload <path> --from <local> (--new | --rev R)   # binaries, generated files
 $CFS download <path> --to <local>
 ```
@@ -47,17 +48,17 @@ $CFS download <path> --to <local>
 
 **YOU MUST DEMONSTRATE, VIA A CURRENT REV, THAT YOU KNOW WHAT IS IN A FILE RIGHT NOW BEFORE YOU CHANGE ANY OF IT.** The rev is the proof, not bookkeeping: a command hands you one only after putting the file's current bytes in front of you. Holding a valid rev while not knowing the file's contents should never both be true.
 
-The loop is **read (or diff) → get rev → write with that rev**. Dropbox verifies it server-side and rejects a stale one. When that happens, don't retry with the same rev — re-read, re-apply your change to what you get back, and write again.
+The loop is **read (or diff) → get rev → write with that rev**. Dropbox verifies it server-side and rejects a stale one. When that happens, don't retry the same rev — re-read, re-apply your change to what you get back, and write again.
 
-**Unsure whether a file changed since you last saw it? `diff --from <the rev you hold>`.** It answers with `UNCHANGED` (your rev is still good) or `CHANGED` plus the current content and a fresh rev. Either way you end up current. `--from` is mandatory and you must pass *your own* rev: there is no default, because the file's previous revision has no relationship to what you have in context. Never write from memory of what a file said earlier in the conversation.
+**Already hold a rev and want to know if it's still good? `diff --from <your rev>`.** One call. It answers `UNCHANGED` (your rev still works) or `CHANGED` plus the current content and a fresh rev. Do not use `history`, and do not re-`read` — `history` lists old revisions and never reports the current one. `--from` is mandatory and must be *your* rev: there is no default, because the file's previous revision has no relationship to what you hold.
 
-**Never pipe `read` through `head` or `tail` to grab just the rev.** The rev proves Dropbox sent current bytes; it does not prove you read them. Byte-exact matching protects you from clobbering content you don't understand, but not from a *stale* edit — one valid against the paragraph you remember while blind to what else changed. Content prints before the rev so that truncating the output loses both. There is no legitimate reason to read a file and discard what it returns.
+**Never pipe `read` through `head` or `tail` to grab just the rev.** The rev proves Dropbox sent current bytes, not that you read them. Exact matching stops you clobbering content you don't understand, but not a *stale* edit — valid against the paragraph you remember, blind to what else moved. Content prints before the rev so truncating loses both.
 
 `edit` refuses ambiguous matches and names the lines it matched; add surrounding context rather than shortening the string. A failed match reports whether the cause was trailing whitespace, indentation, or a near-miss line — read it before retrying.
 
 ## Passing text: raw, via a quoted heredoc
 
-**Use `--stdin` for `write` and a SEARCH/REPLACE block for `edit`; do not hand-escape JSON.** A quoted heredoc (`<<'EOF'`) passes content through untouched — literal newlines, quotes, `$`, backticks, backslashes.
+Never hand-escape JSON. A quoted heredoc (`<<'EOF'`) passes content through untouched — literal newlines, quotes, `$`, backticks, backslashes.
 
 ```bash
 $CFS write /memory/hawaii.md --new --stdin <<'EOF'
@@ -67,7 +68,7 @@ Multiple paragraphs, "quotes" and $vars, all verbatim.
 EOF
 ```
 
-`edit` takes a **SEARCH/REPLACE block**, the same shape as a git merge conflict:
+`edit` takes a **SEARCH/REPLACE block**, the shape of a git merge conflict:
 
 ```bash
 $CFS edit /memory/hawaii.md --rev 0165932a <<'EOF'
@@ -79,11 +80,11 @@ $CFS edit /memory/hawaii.md --rev 0165932a <<'EOF'
 EOF
 ```
 
-Three markers, each used **once**: open, divide, close. Do not repeat `=======` to close the block — `>>>>>>> REPLACE` closes it. That is the single most common mistake with this format.
+Three markers, each used **once**: open, divide, close. Do not repeat `=======` to close the block — `>>>>>>> REPLACE` closes it. That is the most common mistake with this format.
 
-**One block per call.** Several blocks in one call is refused: block syntax is the easiest part to get wrong, and batching makes failure compound — five blocks each 90% likely to be well-formed succeed only 59% of the time, and one typo discards all five. For several edits, run `edit` once per edit and pass the rev each call returns to the next; no re-reading needed.
+**One block per call**; more is refused. Block syntax is the easiest part to get wrong, so batching compounds it — one typo would discard every block. For several edits, run `edit` once each, passing the rev each call returns to the next.
 
-If the file you are editing **contains conflict markers of its own**, a plain block could be split on the file's content instead of your markers. `edit` detects this, refuses, and tells you to add `--tag`, which suffixes all three markers so only your lines are structural:
+When the file **contains conflict markers of its own**, `edit` refuses and tells you to add `--tag`, which suffixes all three markers so only your lines are structural:
 
 ```bash
 $CFS edit /notes/merge.md --rev 0165932a --tag @@X@@ <<'EOF'
@@ -99,28 +100,25 @@ resolved
 EOF
 ```
 
-`write --content "short value"` handles brief single-line writes. Both commands also accept JSON on stdin — `{"content": ...}`, `{"old_str": ..., "new_str": ...}` — and `edit --delim MARK` splits on a single marker line. These suit programmatic callers; prefer the forms above when writing by hand, since hand-escaping newlines across a multi-paragraph page is the most common way these calls fail.
+**NEVER write your text to a scratch file and pipe it in.** Strings go inline, in the heredoc. When a heredoc fails the cause is nearly always the heredoc: its terminator must be alone on its own line, so `EOF@@` never closes it and swallows everything after. Fix that. Routing through a file makes such a typo *disappear* rather than fixing it, and you will blame the wrong cause and repeat it. To replace a whole file from bytes already on disk, use `upload` — that is what it is for.
 
-**NEVER write your text to a scratch file and pipe it in.** Not `create_file` then `< /tmp/x.txt`, not `cat` into the command — the strings always go inline in the tool call, in the heredoc. If a heredoc fails, the cause is nearly always a mistake in the heredoc itself: the terminator must be alone on its own line, so `EOF@@` on one line silently swallows the rest as content. Fix that; do not route around it. Piping from a file makes such a typo *disappear* rather than fixing it, and you will attribute the fix to the wrong cause and repeat the mistake.
+There is deliberately **no way to read the SEARCH text from a file**: an edit must reproduce what it changes, because that is what demonstrates it knows what it is changing.
 
-To replace a whole file with something already on disk, use `upload` — that is what it is for. Text you are composing goes inline; bytes that already exist as a file go through `upload`.
-
-There is also deliberately **no way to read `old_str` from a file**: an edit must reproduce the text it changes, because that is what demonstrates it knows what it is changing.
+`write --content "short value"` covers brief single-line writes. JSON on stdin and `edit --delim MARK` also work, for programmatic callers.
 
 ## Recovering from a bad write
 
-Every file keeps 30 days of revisions, so a bad write is a rollback rather than a loss:
+Every file keeps 30 days of revisions, so a bad write is a rollback, not a loss:
 
 ```bash
 $CFS history /memory/hawaii.md               # revisions, newest first
-$CFS diff /memory/hawaii.md --from 0165931f  # what changed since that rev
 $CFS read /memory/hawaii.md --rev 0165931f   # the full older version
 $CFS restore /memory/hawaii.md --rev 0165931f
 ```
 
 Restoring adds a new revision rather than erasing anything, so it is itself reversible — use it instead of rebuilding a damaged file by hand.
 
-`diff` shows a diff only when it is small enough to take in at a glance (~20 changed lines, under 5% of the file); past that it returns the current file, and `--force` overrides. It hands back a usable rev either way, except on a file too large to print in full, where it withholds and tells you to read. Revision history follows the *path*, so a file deleted and recreated under the same name inherits the old one's revisions.
+`diff` shows a diff only when it is small enough to take in at a glance (~20 changed lines, under 5% of the file); past that it returns the current file, and `--force` overrides. Revision history follows the *path*, so a file deleted and recreated under the same name inherits the old one's revisions.
 
 ## Finding things
 
@@ -129,7 +127,7 @@ $CFS grep 'hotel|flight' --path /memory -i -C 2
 $CFS grep 'TODO' -l                      # matching paths only
 ```
 
-`grep` fetches files and matches locally, so it is exact and immediate. `search` uses Dropbox's server-side index: cheaper on a large tree, but no regex, and it indexes asynchronously so it will not find a file written moments ago. Prefer `grep`.
+`grep` fetches files and matches locally, so it is exact and immediate. `search` uses Dropbox's index: cheaper on a large tree, but no regex, and it indexes asynchronously so it will not find a file written moments ago. Prefer `grep`.
 
 ## Memory conventions
 
