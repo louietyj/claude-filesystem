@@ -304,7 +304,10 @@ def read_payload(required: tuple[str, ...], example: str) -> dict:
             "This command expects a JSON object on stdin. Use a quoted heredoc so "
             f"the shell does not interpret the content:\n\n{example}"
         )
-    raw = sys.stdin.read()
+    return parse_payload(sys.stdin.read(), required, example)
+
+
+def parse_payload(raw: str, required: tuple[str, ...], example: str) -> dict:
     if not raw.strip():
         raise CfsError(f"Empty stdin; expected a JSON object.\n\n{example}")
     try:
@@ -373,6 +376,137 @@ def read_stdin_raw(what: str) -> str:
             "the content alone:\n\n" + STDIN_EXAMPLE
         )
     return sys.stdin.read()
+
+
+SR_START = "<<<<<<< SEARCH"
+SR_DIVIDER = "======="
+SR_END = ">>>>>>> REPLACE"
+
+SR_EXAMPLE = f"""\
+  cfs edit /memory/notes.md --rev 0165932a <<'EOF'
+  {SR_START}
+  - Hotel: unbooked
+  {SR_DIVIDER}
+  - Hotel: booked 3 Mar
+  {SR_END}
+  EOF"""
+
+
+def markers_for(tag: str | None) -> tuple[str, str, str]:
+    if not tag:
+        return SR_START, SR_DIVIDER, SR_END
+    return f"{SR_START} {tag}", f"{SR_DIVIDER} {tag}", f"{SR_END} {tag}"
+
+
+def looks_like_marker(line: str, tag: str | None) -> str | None:
+    """Which marker, if any, this line is. Strict on the divider by design.
+
+    The divider is matched exactly (seven '=' and nothing else, plus the tag),
+    because markdown setext headings are underlined with '=' and a loose match
+    would split blocks on ordinary headings.
+    """
+    start, divider, end = markers_for(tag)
+    if tag:
+        stripped = line.strip()
+        if stripped == start:
+            return "start"
+        if stripped == divider:
+            return "divider"
+        if stripped == end:
+            return "end"
+        return None
+    if line.startswith("<<<<<<<"):
+        return "start"
+    if line.strip() == SR_DIVIDER:
+        return "divider"
+    if line.startswith(">>>>>>>"):
+        return "end"
+    return None
+
+
+def file_has_marker_lines(text: str) -> bool:
+    """Does the target file itself contain lines we would parse as markers?"""
+    return any(looks_like_marker(line, None) for line in text.split("\n"))
+
+
+def parse_search_replace(raw: str, tag: str | None = None) -> list[tuple[str, str]]:
+    """Parse one or more SEARCH/REPLACE blocks from raw stdin.
+
+    Three distinct markers rather than one repeated separator, because a single
+    symmetric delimiter collides with a strong prior: every delimiter-shaped
+    token is either self-closing or a bracket, so agents reliably emit the
+    separator a second time to "close" the block. Here the closing instinct is
+    satisfied by a marker that is not the divider, so it cannot be misspent.
+    """
+    lines = raw.split("\n")
+    start_m, divider_m, end_m = markers_for(tag)
+    example = SR_EXAMPLE if not tag else tagged_example(tag)
+    blocks: list[tuple[str, str]] = []
+    i = 0
+    while i < len(lines):
+        if looks_like_marker(lines[i], tag) != "start":
+            i += 1
+            continue
+
+        start_line = i + 1
+        i += 1
+        old: list[str] = []
+        while i < len(lines) and looks_like_marker(lines[i], tag) != "divider":
+            if looks_like_marker(lines[i], tag) == "end":
+                raise CfsError(
+                    f"The block starting on line {start_line} reached {end_m!r} "
+                    f"without a {divider_m!r} line separating the old text from "
+                    f"the new one.\n\n{example}"
+                )
+            old.append(lines[i])
+            i += 1
+        if i >= len(lines):
+            raise CfsError(
+                f"The block starting on line {start_line} has no {divider_m!r} "
+                f"line, so there is nothing separating old from new.\n\n{example}"
+            )
+
+        i += 1
+        new: list[str] = []
+        while i < len(lines) and looks_like_marker(lines[i], tag) != "end":
+            if looks_like_marker(lines[i], tag) == "divider":
+                raise CfsError(
+                    f"The block starting on line {start_line} has a second "
+                    f"{divider_m!r} line at line {i + 1}. Each block takes exactly "
+                    f"one divider, then closes with {end_m!r} -- do not repeat the "
+                    f"divider to close it.\n\n{example}"
+                )
+            if looks_like_marker(lines[i], tag) == "start":
+                raise CfsError(
+                    f"The block starting on line {start_line} was never closed: "
+                    f"line {i + 1} opens another one. Close each block with "
+                    f"{end_m!r}.\n\n{example}"
+                )
+            new.append(lines[i])
+            i += 1
+        if i >= len(lines):
+            raise CfsError(
+                f"The block starting on line {start_line} was never closed. End it "
+                f"with a {end_m!r} line.\n\n{example}"
+            )
+        i += 1
+        blocks.append(("\n".join(old), "\n".join(new)))
+
+    if not blocks:
+        raise CfsError(
+            f"No SEARCH/REPLACE block found on stdin. Expected a line {start_m!r}. "
+            f"Wrap the old and new text like this:\n\n{example}"
+        )
+    return blocks
+
+
+def tagged_example(tag: str) -> str:
+    start, divider, end = markers_for(tag)
+    return (
+        f"  cfs edit /memory/notes.md --rev 0165932a --tag {tag} <<'EOF'\n"
+        f"  {start}\n  - Hotel: unbooked\n  {divider}\n  - Hotel: booked 3 Mar\n"
+        f"  {end}\n  EOF"
+    )
 
 
 def read_delimited(delim: str) -> tuple[str, str]:
@@ -658,22 +792,51 @@ def cmd_write(args) -> str:
 
 def cmd_edit(args) -> str:
     path = normalise(args.path)
-    if args.delim:
-        warn_if_piped_from_file("edit --delim")
-        old, new = read_delimited(args.delim)
-    else:
-        payload = read_payload(("old_str", "new_str"), EDIT_EXAMPLE)
-        old, new = payload["old_str"], payload["new_str"]
     if not args.rev:
         raise CfsError(
             f"Refusing to edit {path} without --rev. Read the file first and pass "
             "the rev it reports."
         )
-    if old == new:
-        raise CfsError("--old and --new are identical; nothing to do.")
+
+    warn_if_piped_from_file("edit")
+    if args.delim:
+        raw = None
+        edits = [read_delimited(args.delim)]
+    else:
+        raw = read_stdin_raw("a SEARCH/REPLACE block")
+        edits = None  # parsed below, once the file is in hand for the guard
 
     data, meta = content_download({"path": api_path(path)})
     text = data.decode("utf-8", "replace")
+
+    if edits is None:
+        assert raw is not None
+        if raw.lstrip().startswith("{"):
+            payload = parse_payload(raw, ("old_str", "new_str"), EDIT_EXAMPLE)
+            edits = [(payload["old_str"], payload["new_str"])]
+        else:
+            # The guard: refuse rather than risk splitting a block on the file's
+            # own content. Exact, not heuristic -- the bytes are right here.
+            if not args.tag and file_has_marker_lines(text):
+                raise CfsError(
+                    f"{path} itself contains conflict-marker lines, so a plain "
+                    "SEARCH/REPLACE block could be split on the file's own content "
+                    "rather than on your markers. Nothing was written. Re-run with "
+                    f"--tag to make the markers unambiguous:\n\n{tagged_example('@@X@@')}"
+                )
+            edits = parse_search_replace(raw, args.tag)
+            if len(edits) > 1:
+                # One edit per call, deliberately. Block syntax is where agents
+                # most often slip, and batching makes the failure probability
+                # compound: five blocks at 90% each succeed 59% of the time, and
+                # a single typo discards all five. Sequential edits keep each
+                # failure local, and edit returns a fresh rev so chaining them
+                # costs no extra reads.
+                raise CfsError(
+                    f"Found {len(edits)} SEARCH/REPLACE blocks, but edit applies one "
+                    "at a time. Nothing was written. Run it once per edit, passing "
+                    "the rev each call returns to the next."
+                )
 
     if meta["rev"] != args.rev:
         # Deliberately does not disclose the current rev. Handing it over here
@@ -686,7 +849,11 @@ def cmd_edit(args) -> str:
             "rev from that read."
         )
 
+    old, new = edits[0]
+    if old == new:
+        raise CfsError("The old and new text are identical; nothing to do.")
     updated = apply_replacement(text, old, new, path, replace_all=args.all)
+
     if updated == text:
         raise CfsError("Replacement produced no change; nothing written.")
     result = content_upload(
@@ -1178,13 +1345,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser(
         "edit",
-        help='replace a unique string; JSON stdin {"old_str": "...", "new_str": "..."}',
+        help="replace text via a SEARCH/REPLACE block on stdin",
     )
     p.add_argument("path")
     p.add_argument("--rev", help="current rev, from read")
     p.add_argument(
+        "--tag",
+        help="suffix for the SEARCH/REPLACE markers, when the file contains "
+        "conflict-marker lines of its own",
+    )
+    p.add_argument(
         "--delim",
-        help="read raw stdin, splitting old from new on a line equal to this marker",
+        help="alternative input: split old from new on a line equal to this marker",
     )
     p.add_argument(
         "--all",

@@ -82,6 +82,137 @@ body $ROOT/raw.md | grep -q 'lone \\n' \
 expect_err "write --content and --stdin conflict" "mutually exclusive" \
   $CFS write $ROOT/raw.md --new --content "x" --stdin
 
+echo "=== edit via SEARCH/REPLACE (the default) ==="
+expect_ok_json "seed a file to edit" '{"content":"alpha\nbeta\ngamma\n"}' \
+  $CFS write $ROOT/sr.md --new
+SREV=$(revof $ROOT/sr.md)
+$CFS edit $ROOT/sr.md --rev "$SREV" <<'RAWEOF'
+<<<<<<< SEARCH
+beta
+=======
+BETA CHANGED
+>>>>>>> REPLACE
+RAWEOF
+if [ $? -eq 0 ]; then ok "SEARCH/REPLACE edit applies"; else bad "SEARCH/REPLACE edit applies"; fi
+body $ROOT/sr.md | grep -q "BETA CHANGED" && ok "the replacement landed" \
+  || bad "the replacement landed"
+
+# The exact mistake seen repeatedly in the wild: closing the block by repeating
+# the divider. A single symmetric delimiter invited this; three distinct
+# markers mean the closing instinct lands on REPLACE instead.
+SREV=$(revof $ROOT/sr.md)
+OUT=$($CFS edit $ROOT/sr.md --rev "$SREV" 2>&1 <<'RAWEOF'
+<<<<<<< SEARCH
+alpha
+=======
+ALPHA
+=======
+>>>>>>> REPLACE
+RAWEOF
+)
+echo "$OUT" | grep -qi "second" && ok "a repeated divider is caught" \
+  || bad "a repeated divider is caught"
+echo "$OUT" | grep -qi "do not repeat the divider" \
+  && ok "the error names the actual mistake" || bad "the error names the actual mistake"
+body $ROOT/sr.md | grep -q "^alpha$" && ok "the failed edit wrote nothing" \
+  || bad "the failed edit wrote nothing"
+
+echo "=== one edit per call ==="
+# Batching blocks compounds failure: block syntax is the most error-prone part,
+# so N blocks succeed at p^N and one typo discards all N. Sequential edits keep
+# each failure local, and edit returns a fresh rev so chaining costs no reads.
+SREV=$(revof $ROOT/sr.md)
+OUT=$($CFS edit $ROOT/sr.md --rev "$SREV" 2>&1 <<'RAWEOF'
+<<<<<<< SEARCH
+alpha
+=======
+ONE
+>>>>>>> REPLACE
+<<<<<<< SEARCH
+gamma
+=======
+THREE
+>>>>>>> REPLACE
+RAWEOF
+)
+echo "$OUT" | grep -qi "2 SEARCH/REPLACE blocks" && ok "a batch of blocks is refused" \
+  || bad "a batch of blocks is refused"
+echo "$OUT" | grep -qi "one at a time" && ok "the refusal says one edit per call" \
+  || bad "the refusal says one edit per call"
+body $ROOT/sr.md | grep -q "^alpha$" && ok "the refused batch wrote nothing" \
+  || bad "the refused batch wrote nothing"
+
+# Chaining sequentially is the supported path: each call returns the next rev.
+NEXT=$(printf '<<<<<<< SEARCH\nalpha\n=======\nONE\n>>>>>>> REPLACE\n' \
+  | $CFS edit $ROOT/sr.md --rev "$SREV" | sed -n 's/^new rev: \([a-z0-9]*\).*/\1/p')
+[ -n "$NEXT" ] && ok "edit returns the rev for the next edit" \
+  || bad "edit returns the rev for the next edit"
+printf '<<<<<<< SEARCH\ngamma\n=======\nTHREE\n>>>>>>> REPLACE\n' \
+  | $CFS edit $ROOT/sr.md --rev "$NEXT" >/dev/null 2>&1 \
+  && ok "the returned rev chains straight into the next edit" \
+  || bad "the returned rev chains straight into the next edit"
+body $ROOT/sr.md | grep -q "ONE" && body $ROOT/sr.md | grep -q "THREE" \
+  && ok "both sequential edits landed" || bad "both sequential edits landed"
+
+echo "=== files containing real conflict markers ==="
+$CFS write $ROOT/conflict.md --new --stdin <<'RAWEOF'
+# Merge notes
+<<<<<<< HEAD
+ours
+=======
+theirs
+>>>>>>> feature-branch
+done
+RAWEOF
+CREV=$(revof $ROOT/conflict.md)
+OUT=$($CFS edit $ROOT/conflict.md --rev "$CREV" 2>&1 <<'RAWEOF'
+<<<<<<< SEARCH
+done
+=======
+finished
+>>>>>>> REPLACE
+RAWEOF
+)
+echo "$OUT" | grep -qi "contains conflict-marker lines" \
+  && ok "an untagged edit on such a file is refused" \
+  || bad "an untagged edit on such a file is refused"
+echo "$OUT" | grep -q -- "--tag" && ok "the refusal names --tag as the fix" \
+  || bad "the refusal names --tag as the fix"
+body $ROOT/conflict.md | grep -q "^done$" && ok "the refused edit wrote nothing" \
+  || bad "the refused edit wrote nothing"
+
+$CFS edit $ROOT/conflict.md --rev "$CREV" --tag @@X@@ <<'RAWEOF'
+<<<<<<< SEARCH @@X@@
+done
+======= @@X@@
+finished
+>>>>>>> REPLACE @@X@@
+RAWEOF
+if [ $? -eq 0 ]; then ok "--tag makes the edit work"; else bad "--tag makes the edit work"; fi
+body $ROOT/conflict.md | grep -q "finished" && ok "the tagged edit landed" \
+  || bad "the tagged edit landed"
+body $ROOT/conflict.md | grep -q "^ours$" \
+  && ok "the file's own conflict markers survived untouched" \
+  || bad "the file's own conflict markers survived untouched"
+
+# And the real prize: editing across the file's own markers.
+CREV=$(revof $ROOT/conflict.md)
+$CFS edit $ROOT/conflict.md --rev "$CREV" --tag @@X@@ <<'RAWEOF'
+<<<<<<< SEARCH @@X@@
+<<<<<<< HEAD
+ours
+=======
+theirs
+>>>>>>> feature-branch
+======= @@X@@
+resolved
+>>>>>>> REPLACE @@X@@
+RAWEOF
+if [ $? -eq 0 ]; then ok "a tagged block can contain conflict markers"
+else bad "a tagged block can contain conflict markers"; fi
+body $ROOT/conflict.md | grep -q "^resolved$" && ok "the conflict block was replaced" \
+  || bad "the conflict block was replaced"
+
 echo "=== edit --delim: two raw strings, no escaping ==="
 RAWREV=$(revof $ROOT/raw.md)
 $CFS edit $ROOT/raw.md --rev "$RAWREV" --delim @@ <<'RAWEOF'

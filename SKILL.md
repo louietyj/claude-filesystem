@@ -30,7 +30,7 @@ $CFS list [path] [--depth N]              # names and sizes (no revs — read fo
 $CFS read <path> [--lines 1-40] [--full]  # content AND the rev you need to write
 $CFS read <path> --rev R                  # a historical version; cannot license a write
 $CFS write <path> (--new | --rev R) --stdin  # raw content on stdin
-$CFS edit <path> --rev R --delim @@ [--all]  # raw: old @@ new on stdin
+$CFS edit <path> --rev R [--tag T] [--all]   # SEARCH/REPLACE block on stdin
 $CFS delete <path> --rev R                # --force for directories
 $CFS rename <old> <new>
 $CFS copy <src> <dst>
@@ -57,7 +57,7 @@ The loop is **read (or diff) → get rev → write with that rev**. Dropbox veri
 
 ## Passing text: raw, via a quoted heredoc
 
-**Use `--stdin` and `--delim`; do not hand-escape JSON.** A quoted heredoc (`<<'EOF'`) passes content through untouched — literal newlines, quotes, `$`, backticks, backslashes.
+**Use `--stdin` for `write` and a SEARCH/REPLACE block for `edit`; do not hand-escape JSON.** A quoted heredoc (`<<'EOF'`) passes content through untouched — literal newlines, quotes, `$`, backticks, backslashes.
 
 ```bash
 $CFS write /memory/hawaii.md --new --stdin <<'EOF'
@@ -67,19 +67,39 @@ Multiple paragraphs, "quotes" and $vars, all verbatim.
 EOF
 ```
 
-`edit` needs two strings, so name a marker line that separates them:
+`edit` takes a **SEARCH/REPLACE block**, the same shape as a git merge conflict:
 
 ```bash
-$CFS edit /memory/hawaii.md --rev 0165932a --delim @@ <<'EOF'
+$CFS edit /memory/hawaii.md --rev 0165932a <<'EOF'
+<<<<<<< SEARCH
 - Hotel: unbooked
-@@
+=======
 - Hotel: booked 3 Mar
+>>>>>>> REPLACE
 EOF
 ```
 
-The marker must be a line of its own, appearing exactly once; pick something absent from your text (`@@`, `---8<---`). Zero or multiple occurrences fail with a message saying so. The heredoc's closing newline is dropped from each side, since it belongs to the heredoc rather than to your text.
+Three markers, each used **once**: open, divide, close. Do not repeat `=======` to close the block — `>>>>>>> REPLACE` closes it. That is the single most common mistake with this format.
 
-`write --content "short value"` handles brief single-line writes. Both commands also accept JSON on stdin — `{"content": ...}`, `{"old_str": ..., "new_str": ...}` — which suits programmatic callers, but hand-escaping newlines across a multi-paragraph page is the most common way these calls fail. Prefer raw.
+**One block per call.** Several blocks in one call is refused: block syntax is the easiest part to get wrong, and batching makes failure compound — five blocks each 90% likely to be well-formed succeed only 59% of the time, and one typo discards all five. For several edits, run `edit` once per edit and pass the rev each call returns to the next; no re-reading needed.
+
+If the file you are editing **contains conflict markers of its own**, a plain block could be split on the file's content instead of your markers. `edit` detects this, refuses, and tells you to add `--tag`, which suffixes all three markers so only your lines are structural:
+
+```bash
+$CFS edit /notes/merge.md --rev 0165932a --tag @@X@@ <<'EOF'
+<<<<<<< SEARCH @@X@@
+<<<<<<< HEAD
+ours
+=======
+theirs
+>>>>>>> feature-branch
+======= @@X@@
+resolved
+>>>>>>> REPLACE @@X@@
+EOF
+```
+
+`write --content "short value"` handles brief single-line writes. Both commands also accept JSON on stdin — `{"content": ...}`, `{"old_str": ..., "new_str": ...}` — and `edit --delim MARK` splits on a single marker line. These suit programmatic callers; prefer the forms above when writing by hand, since hand-escaping newlines across a multi-paragraph page is the most common way these calls fail.
 
 **NEVER write your text to a scratch file and pipe it in.** Not `create_file` then `< /tmp/x.txt`, not `cat` into the command — the strings always go inline in the tool call, in the heredoc. If a heredoc fails, the cause is nearly always a mistake in the heredoc itself: the terminator must be alone on its own line, so `EOF@@` on one line silently swallows the rest as content. Fix that; do not route around it. Piping from a file makes such a typo *disappear* rather than fixing it, and you will attribute the fix to the wrong cause and repeat the mistake.
 

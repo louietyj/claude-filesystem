@@ -37,7 +37,7 @@ No local "last read" state is kept, and none would be trustworthy if it were —
 
 A rev is therefore not a version number but **evidence that the caller has seen the file's current bytes**. Every command is audited against that:
 
-- **Discloses**: `read`, `write`, `edit`, `upload` — you have seen or authored the content. `diff` too: passing `--rev <yours>` means you hold that revision, so base plus delta reconstructs the current file, and the oversized branch returns the whole file outright.
+- **Discloses**: `read`, `write`, `edit`, `upload` — you have seen or authored the content. `diff` too: passing `--from <yours>` means you hold that revision, so base plus delta reconstructs the current file, and the oversized branch returns the whole file outright.
 - **Withholds**: `list`, `search`, `grep`, `history`, `restore`, `read --rev`, the stale-rev error, and `diff` when the file was too large to print in full — none of these put the current bytes in front of you.
 
 Disclosing one anywhere else mints the evidence for free and voids the guarantee. The integration suite audits every command against the **actual current rev string**, never against formatting like `"rev: "` — an earlier version made that mistake and `diff` and `history` leaked the live rev in plain sight while passing.
@@ -50,7 +50,7 @@ The surface is curated, and that is the enforcement mechanism. There is no raw A
 
 So: thin where there is no invariant (`copy`, `search`, `history`, `download`), deliberately thick where there is (`write`, `edit`, `delete`, `upload`). The thickness is the product. Don't "simplify" it away.
 
-`edit` and `write` take their strings on stdin, raw, via a quoted heredoc — `edit` splitting old from new on a caller-chosen marker line. A JSON object is still accepted for programmatic callers.
+`write` takes raw content on stdin via a quoted heredoc. `edit` takes a SEARCH/REPLACE block in git-conflict-marker shape, with an optional `--tag` suffix for files that contain such markers themselves. A single-marker `--delim` split and a JSON object are still accepted for programmatic callers.
 
 Raw is the default because the alternative nests two encodings that contradict each other. JSON escaping is not itself the asymmetry with native tools: Messages API tool inputs *are* JSON, emitted by the model as `input_json_delta` text. The asymmetry is the wrapper. Natively the JSON is the outermost thing emitted; here it sat inside a heredoc whose whole affordance is "type literal text, newlines included" — exactly what the inner JSON rejects. A quoted heredoc on its own transforms nothing, so raw stdin means one transparent layer rather than two contradictory ones.
 
@@ -71,16 +71,18 @@ The app is scoped to a single Dropbox app folder; nothing outside it is reachabl
 ## Testing
 
 ```
-python test_cfs.py         # 52 offline tests, no network
-bash integration_test.sh   # 133 live tests against the app folder
+python test_cfs.py         # 70 offline tests, no network
+bash integration_test.sh   # 164 live tests against the app folder
 ```
 
-The offline suite covers path traversal, edit ambiguity, JSON and delimiter payload parsing, the write-mode rules, the retry policy, and root protection. The integration suite covers every command against the real API, including the guardrails only the server can enforce:
+The offline suite covers path traversal, edit ambiguity, SEARCH/REPLACE parsing including tagged markers and marker detection, JSON and delimiter payloads, the write-mode rules, the retry policy, and root protection. The integration suite covers every command against the real API, including the guardrails only the server can enforce:
 
 - a stale-rev write is rejected **and verified not to have clobbered**
 - every rev-disclosure path is asserted against the file's actual current rev
 - shell metacharacters survive verbatim, through raw stdin and through JSON
 - a multi-paragraph heredoc round-trips with no escaping
+- a file containing real git conflict markers is edited via `--tag`
+- a batch of SEARCH/REPLACE blocks is refused, and sequential edits chain via the returned rev
 - binaries round-trip byte-identical
 - a file is deliberately corrupted, then recovered with `restore`
 

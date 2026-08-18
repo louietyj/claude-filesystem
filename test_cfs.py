@@ -208,6 +208,122 @@ class TestReadPayload(unittest.TestCase):
             cfs.read_payload(("content",), "example")
 
 
+class TestSearchReplace(unittest.TestCase):
+    def parse(self, text, tag=None):
+        return cfs.parse_search_replace(text, tag)
+
+    def test_single_block(self):
+        raw = "<<<<<<< SEARCH\nold\n=======\nnew\n>>>>>>> REPLACE\n"
+        self.assertEqual(self.parse(raw), [("old", "new")])
+
+    def test_multiline_sides(self):
+        raw = "<<<<<<< SEARCH\na\nb\n=======\nA\nB\n>>>>>>> REPLACE\n"
+        self.assertEqual(self.parse(raw), [("a\nb", "A\nB")])
+
+    def test_parser_reports_every_block_so_edit_can_refuse_a_batch(self):
+        # The parser sees them all; edit rejects more than one, because block
+        # syntax is the most error-prone part and batching compounds it.
+        raw = (
+            "<<<<<<< SEARCH\na\n=======\nA\n>>>>>>> REPLACE\n"
+            "<<<<<<< SEARCH\nb\n=======\nB\n>>>>>>> REPLACE\n"
+        )
+        self.assertEqual(self.parse(raw), [("a", "A"), ("b", "B")])
+
+    def test_empty_replace_is_a_deletion(self):
+        raw = "<<<<<<< SEARCH\ngone\n=======\n>>>>>>> REPLACE\n"
+        self.assertEqual(self.parse(raw), [("gone", "")])
+
+    def test_content_with_shell_and_json_hostile_chars(self):
+        raw = '<<<<<<< SEARCH\nsay "hi" $HOME `x` \\ done\n=======\nnew\n>>>>>>> REPLACE\n'
+        self.assertEqual(self.parse(raw)[0][0], 'say "hi" $HOME `x` \\ done')
+
+    def test_setext_heading_underline_is_not_a_divider(self):
+        # Markdown H1 underlines are '=' runs; only exactly seven counts.
+        raw = "<<<<<<< SEARCH\nTitle\n=====\n=========\n=======\nnew\n>>>>>>> REPLACE\n"
+        old, new = self.parse(raw)[0]
+        self.assertEqual(old, "Title\n=====\n=========")
+        self.assertEqual(new, "new")
+
+    def test_repeated_divider_as_a_closer_is_rejected(self):
+        # The exact mistake seen in the wild: closing the block by repeating
+        # the separator instead of using the REPLACE marker.
+        raw = "<<<<<<< SEARCH\nold\n=======\nnew\n=======\n>>>>>>> REPLACE\n"
+        with self.assertRaises(cfs.CfsError) as ctx:
+            self.parse(raw)
+        message = str(ctx.exception)
+        self.assertIn("second", message)
+        self.assertIn("do not repeat the divider", message)
+
+    def test_missing_divider_is_rejected(self):
+        raw = "<<<<<<< SEARCH\nold\n>>>>>>> REPLACE\n"
+        with self.assertRaises(cfs.CfsError) as ctx:
+            self.parse(raw)
+        self.assertIn("without a", str(ctx.exception))
+
+    def test_unclosed_block_is_rejected(self):
+        raw = "<<<<<<< SEARCH\nold\n=======\nnew\n"
+        with self.assertRaises(cfs.CfsError) as ctx:
+            self.parse(raw)
+        self.assertIn("never closed", str(ctx.exception))
+
+    def test_nested_start_is_rejected(self):
+        raw = "<<<<<<< SEARCH\na\n=======\nA\n<<<<<<< SEARCH\n"
+        with self.assertRaises(cfs.CfsError) as ctx:
+            self.parse(raw)
+        self.assertIn("never closed", str(ctx.exception))
+
+    def test_no_block_at_all_is_rejected(self):
+        with self.assertRaises(cfs.CfsError) as ctx:
+            self.parse("just some text\n")
+        self.assertIn("No SEARCH/REPLACE block", str(ctx.exception))
+
+
+class TestSearchReplaceTag(unittest.TestCase):
+    TAG = "@@X@@"
+
+    def test_tagged_markers_parse(self):
+        raw = (
+            f"<<<<<<< SEARCH {self.TAG}\nold\n======= {self.TAG}\nnew\n"
+            f">>>>>>> REPLACE {self.TAG}\n"
+        )
+        self.assertEqual(cfs.parse_search_replace(raw, self.TAG), [("old", "new")])
+
+    def test_untagged_markers_inside_content_are_literal(self):
+        # The whole point: a file containing real conflict markers can still be
+        # edited, because only the tagged lines are structural.
+        raw = (
+            f"<<<<<<< SEARCH {self.TAG}\n"
+            "<<<<<<< HEAD\nmine\n=======\ntheirs\n>>>>>>> branch\n"
+            f"======= {self.TAG}\nresolved\n>>>>>>> REPLACE {self.TAG}\n"
+        )
+        old, new = cfs.parse_search_replace(raw, self.TAG)[0]
+        self.assertEqual(old, "<<<<<<< HEAD\nmine\n=======\ntheirs\n>>>>>>> branch")
+        self.assertEqual(new, "resolved")
+
+    def test_tagged_mode_ignores_untagged_blocks_entirely(self):
+        raw = "<<<<<<< SEARCH\nold\n=======\nnew\n>>>>>>> REPLACE\n"
+        with self.assertRaises(cfs.CfsError):
+            cfs.parse_search_replace(raw, self.TAG)
+
+
+class TestMarkerDetection(unittest.TestCase):
+    def test_detects_conflict_markers_in_a_file(self):
+        self.assertTrue(cfs.file_has_marker_lines("a\n<<<<<<< HEAD\nb\n"))
+        self.assertTrue(cfs.file_has_marker_lines("a\n=======\nb\n"))
+        self.assertTrue(cfs.file_has_marker_lines("a\n>>>>>>> branch\n"))
+
+    def test_ordinary_markdown_is_not_flagged(self):
+        self.assertFalse(cfs.file_has_marker_lines("# Title\n\n- a\n- b\n"))
+
+    def test_setext_headings_are_not_flagged(self):
+        # Only exactly seven '=' is structural, so real headings pass.
+        self.assertFalse(cfs.file_has_marker_lines("Title\n=====\n\nBody\n"))
+        self.assertFalse(cfs.file_has_marker_lines("Title\n==========\n"))
+
+    def test_exactly_seven_equals_is_flagged(self):
+        self.assertTrue(cfs.file_has_marker_lines("Title\n=======\n"))
+
+
 class TestReadDelimited(unittest.TestCase):
     def _stdin(self, text):
         sys.stdin = io.StringIO(text)
